@@ -31,8 +31,8 @@ batches (until included into chain), etc.
 
 ### Communication
 
-The module accepts input messages from queue filled by `net`. It also has timers for request timeouts. The module may
-call directly both `net` and `chain` modules:
+The module accepts input messages from queue filled by `net`. It also has timers for
+[request timeouts](#request-timeout). The module may call directly both `net` and `chain` modules:
 
 | Module  | Calls                                                                                                |
 |---------|------------------------------------------------------------------------------------------------------|
@@ -46,6 +46,16 @@ To obtain information from peers about the blockchain state, the module sends th
 | `getheaders` | protocol version, block locator, stop hash           | header download, last common ancestor search, inventory processing |
 | `getdata`    | inventory items of type `MSG_WITNESS_BLOCK` (BIP144) | block download                                                     |
 
+### Request timeout
+
+Every `getheaders` and `getdata` that `block-sync` sends is a request with a deadline of `request_timeout_secs` seconds
+after sending. A request is answered when a message that matches it by peer and content arrives (`headers` whose first
+header's parent is a block of the locator, or an empty `headers`, for `getheaders`; the `block` with the requested hash,
+or a `notfound` naming it, for `getdata`). A request that reaches its deadline unanswered has failed. Each flow states
+what a failed request means for it: header download in [IBD](../../flows/mode-ibd.md#downloading-headers), block
+download in [peer selection](#peer-selection), the LCA search in
+[standard mode](../../flows/mode-standard.md#processing-headers).
+
 --- 
 
 ## Interface
@@ -56,11 +66,9 @@ To obtain information from peers about the blockchain state, the module sends th
 
 ## Configuration
 
-TBD
-
 ```toml
 [block-sync]
-
+request_timeout_secs = 60 # deadline of a getheaders or getdata request
 ```
 
 ---

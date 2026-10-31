@@ -8,13 +8,18 @@ The node enters IBD on first launch, when the database is clear and tip is genes
 
 ## Downloading headers
 
-1. `block-sync` selects one peer, using `net` as the CRUD for peers.
+1. `block-sync` selects one connected peer, the sync peer, using `net` as the CRUD for peers.
 2. `block-sync` requests `getheaders` from it, in batches of 2000 headers. The first request carries a locator of the
    active chain; each next request carries the last header
    received ([block locator](../modules/block-sync/README.md#block-locator)).
 3. `block-sync` continues until it has downloaded all headers this peer knows: an answer with fewer than 2000 headers.
 4. `block-sync` validates the whole header chain by calling `chain.validate_headers`, and stores it with
    `chain.store_headers`.
+
+If a `getheaders` to the sync peer fails ([request timeout](../modules/block-sync/README.md#request-timeout)),
+`block-sync` selects another random connected peer as the sync peer and repeats the request with the same locator; the
+download resumes from the last header received. When every connected peer has failed in turn, `block-sync` waits
+`request_timeout_secs` seconds and starts again with the first.
 
 ```mermaid
 sequenceDiagram
@@ -31,6 +36,7 @@ sequenceDiagram
         N -) P: getheaders
         P -) N: headers
         N -) BS: queue: {peer, "headers", headers}
+        Note over BS: if no answer within the request timeout —<br/> select another connected peer as the sync peer,<br/>repeat the request with the same locator
     end
     BS ->> C: chain.validate_headers(headers[..])
     C -->> BS: ok
