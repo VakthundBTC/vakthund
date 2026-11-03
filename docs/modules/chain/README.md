@@ -118,16 +118,32 @@ has more work. On equal chain work the node keeps its current chain, as Bitcoin 
 
 ### Blocks
 
-As Bitcoin Core's `CheckBlock` and `ContextualCheckBlock`:
+Block checks run in three groups. The first two need only the block and run in `store_block`; the third needs the
+active chain and the UTXO set and runs in `connect_block`.
 
-- merkle root, no duplicate transactions, size and weight limits, exactly one coinbase at position 0, `CheckTransaction`
-  for every transaction, legacy sigop limit;
-- transaction finality, BIP34 coinbase height, BIP141 witness commitment;
+#### Mutation checks
+
+Mutation checks correspond to Bitcoin Core's `IsBlockMutated`. A failure means the block's transactions do not match its
+header:
+
+- Merkle root (`bad-txnmrklroot`), no duplicate transactions (`bad-txns-duplicate`);
+- BIP141 witness commitment (`bad-witness-merkle-match`, `bad-witness-nonce-size`, `unexpected-witness`).
+
+#### Basic parameters validation
+
+The other checks correspond to Bitcoin Core's `CheckBlock`. A failure means the block is invalid by consensus:
+
+- size and weight limits, exactly one coinbase at position 0, `CheckTransaction` for every transaction, legacy sigop
+  limit;
 - signet only: the coinbase witness commitment carries a solution to the signet challenge of the
   [consensus parameters](#consensus-parameters) (BIP325, `bad-signet-blksig`).
 
-As Bitcoin Core's `ConnectBlock`, against the UTXO set:
+#### Check with context
 
+As Bitcoin Core's `ContextualCheckBlock` and `ConnectBlock` we check the block against the active chain and the UTXO
+set. A failure means the block is invalid by consensus:
+
+- transaction finality, BIP34 coinbase height;
 - BIP30: a transaction does not overwrite an unspent output (with Core's exceptions);
 - `Consensus::CheckTxInputs`: inputs exist and are unspent, coinbase maturity (100 blocks), amounts in range, inputs
   cover outputs;
@@ -158,17 +174,30 @@ Direct calls. In v0.1 the only caller is `block-sync`. Calls that write are exec
 
 ### Blocks
 
-| Call            | Input      | Output                          |
-|-----------------|------------|---------------------------------|
-| `connect_block` | block      | new tip, or `rejected {reason}` |
-| `block`         | block hash | stored block, or not found      |
+| Call            | Input      | Output                                                                       |
+|-----------------|------------|------------------------------------------------------------------------------|
+| `store_block`   | block      | `stored`, or `rejected {mutated, reason}`, or `rejected {consensus, reason}` |
+| `connect_block` | block hash | new tip, or `rejected {reason}`                                              |
+| `block`         | block hash | stored block, or not found                                                   |
+
+`store_block`:
+
+1. The block's header MUST be stored; otherwise `rejected {unknown-header}`.
+2. Run the mutation checks of the [block validation](#blocks). If one fails: `rejected {mutated, reason}` and nothing
+   is written.
+3. Run the other `CheckBlock` checks. If one fails: `rejected {consensus, reason}` and nothing is written.
+4. Store the block ([storage.md](../../architecture/storage.md#storing-a-block)). Storing a block that is already
+   stored writes nothing and returns `stored`.
 
 `connect_block`:
 
 1. The block's header MUST be stored; otherwise `rejected {unknown-header}`.
-2. The block's parent MUST be the tip block; otherwise `rejected {not-sequential}`.
-3. Run the [block validation](#blocks). If invalid: `rejected {reason}` and nothing is written.
-4. Store the block, apply it to the UTXO set and move the
+2. The block MUST be stored; otherwise `rejected {no-block}`.
+3. The block's parent MUST be the tip block; otherwise `rejected {not-sequential}`.
+4. Read the block from `blocks` and run the contextual and UTXO checks of the [block validation](#blocks). If invalid:
+   `rejected {reason}` and nothing is written. Every such rejection is a consensus failure: the block passed the
+   mutation checks when it was stored.
+5. Apply the block to the UTXO set and move the
    tip ([storage.md](../../architecture/storage.md#connecting-a-block-to-the-tip-block)).
 
 ### Tip and UTXO set

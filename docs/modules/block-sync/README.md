@@ -34,10 +34,10 @@ batches (until included into chain), etc.
 The module accepts input messages from queue filled by `net`. It also has timers for
 [request timeouts](#request-timeout). The module may call directly both `net` and `chain` modules:
 
-| Module  | Calls                                                                                                |
-|---------|------------------------------------------------------------------------------------------------------|
-| `net`   | `get_peers`, `get_peer`, `send`, `disconnect`                                                        |
-| `chain` | `validate_headers`, `store_headers`, `header`, `header_at`, `tip`, `connect_block`, `disconnect_tip` |
+| Module  | Calls                                                                                                               |
+|---------|---------------------------------------------------------------------------------------------------------------------|
+| `net`   | `get_peers`, `get_peer`, `send`, `disconnect`                                                                       |
+| `chain` | `validate_headers`, `store_headers`, `header`, `header_at`, `tip`, `store_block`, `connect_block`, `disconnect_tip` |
 
 To obtain information from peers about the blockchain state, the module sends the following messages:
 
@@ -77,8 +77,35 @@ request_timeout_secs = 60 # deadline of a getheaders or getdata request
 
 ### Peer selection
 
-| Request                     | Peers eligible                                                                                                                                                                                                                                                                                                                                            |
-|-----------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Header download (IBD)       | one random connected peer: the sync peer                                                                                                                                                                                                                                                                                                                  |
-| Block download              | first the peer the blocks were learned from: the sync peer in IBD, the peer that announced the header in standard mode and in a reorg. If that peer does not answer within the request timeout or answers `notfound`, random connected peers whose features include `NODE_NETWORK` and `NODE_WITNESS`, one after another, until a peer returns the block. |
-| Last common ancestor search | the peer that sent the header                                                                                                                                                                                                                                                                                                                             |
+| Request                     | Peers eligible                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+|-----------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Header download (IBD)       | one random connected peer: the sync peer                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Block download              | first the peer the blocks were learned from: the sync peer in IBD, the peer that announced the header in standard mode and in a reorg. If that peer does not answer within the request timeout or answers `notfound`, random connected peers whose features include `NODE_NETWORK` and `NODE_WITNESS`, one after another, until a peer returns the block. When every eligible peer has failed for the block: [unavailable block](#unavailable-block). |
+| Last common ancestor search | the peer that sent the header                                                                                                                                                                                                                                                                                                                                                                                                                         |
+
+### Block download
+
+Every block the node downloads goes through two `chain` calls, in IBD, standard mode and reorg alike:
+
+1. Before requesting a block, `block-sync` calls `chain.header(hash)`. If `has_block` is set, the block is not
+   requested: it is already stored.
+2. On receipt, `block-sync` calls `chain.store_block(block)`. If the block is rejected:
+    - `rejected {mutated}`: the block is requested from another eligible peer ([peer selection](#peer-selection)).
+    - `rejected {consensus}`: `block-sync` reports a consensus failure and the node stops.
+3. In height order, once the block `tip+1` is stored, `block-sync` calls `chain.connect_block(hash)`. `rejected`:
+   `block-sync` reports a consensus failure and the node stops.
+
+Blocks may be received and stored in any order; they are connected in height order.
+
+### Unavailable block
+
+A block is unavailable when every eligible peer has failed for it: request timeout or `notfound`. `block-sync` then:
+
+- drops the request for it and the requests that depend on it: the blocks after it in the same download;
+- keeps everything stored so far: the headers beyond the tip and the blocks already stored with `chain.store_block`;
+- continues in standard mode on the current tip. In IBD this is the switch to standard mode. In a reorg the reorg is
+  abandoned; nothing has been disconnected.
+
+The blocks are requested again when a later announcement leads to them
+([append new header](../../flows/mode-standard.md#append-new-header)); the blocks already stored are not downloaded
+again (`has_block`).

@@ -51,21 +51,22 @@ candidate header chain.
 
 ## Downloading blocks
 
-Blocks are downloaded from the beginning.
+Blocks are downloaded from the beginning ([block download](../modules/block-sync/README.md#block-download)).
 
 1. The current tip block is at height `tip`: all headers, and all blocks up to and including the tip block, are
    validated and stored.
-2. `block-sync` knows the candidate header for `tip+1`. It sends `getdata` (`MSG_WITNESS_BLOCK`) for it to the sync
-   peer; if the sync peer does not answer, to random eligible peers ([peer selection](../modules/block-sync/README.md#peer-selection)). Requests are made in batches (TBD).
-3. When the data for block `tip+1` is received, `block-sync` requests validation and tip update from `chain` (
-   `connect_block`).
-4. If the block is valid and follows the tip block, `chain` updates the tip. Otherwise, the block is rejected with the
-   corresponding error.
-5. If the block is rejected:
-    - if the rejection reason shows a mutated block, `block-sync`
-      requests the block from another peer and returns to step 1;
-    - otherwise the block is invalid by consensus while its header is valid: `block-sync` reports a consensus failure
-      and the node stops.
+2. `block-sync` knows the candidate headers `tip+1 ...`. Blocks which are already stored are not requested. For the
+   others it sends `getdata` (`MSG_WITNESS_BLOCK`) to the sync peer; if the sync peer does not answer, to random
+   eligible peers ([peer selection](../modules/block-sync/README.md#peer-selection)). Requests are made in batches (
+   TBD).
+3. When a block is received, `block-sync` calls `chain.store_block` with it. If the block is rejected:
+    - `rejected {mutated}`: `block-sync` requests the block from another eligible peer.
+    - `rejected {consensus}`: `block-sync` reports a consensus failure and the node stops.
+4. When the block `tip+1` is stored, `block-sync` calls `chain.connect_block` with its hash. If the block is valid,
+   `chain` moves the tip to it and `block-sync` continues from step 1. Otherwise the block is invalid by consensus while
+   its header is valid: `block-sync` reports a consensus failure and the node stops.
+5. If a block is unavailable from every eligible peer, `block-sync` switches to standard mode on the current tip
+   ([unavailable block](../modules/block-sync/README.md#unavailable-block)).
 
 ```mermaid
 sequenceDiagram
@@ -76,21 +77,32 @@ sequenceDiagram
     participant C as chain
     BS ->> C: chain.tip()
     C -->> BS: tip
-    Note over BS: knows candidate headers tip+1..tip+n<br/>
+    Note over BS: knows candidate headers tip+1..tip+n<br/>skips the blocks with has_block
     BS ->> N: net.send(sync peer, "getdata", getdata[tip+1..tip+n])
     N -) P: getdata
     P -) N: block[tip+1..tip+n]
     N -) BS: queue: {peer, "block", block[tip+1..tip+n]}
-    Note over BS: if no answer within the request timeout, or notfound —<br/>request the missing blocks from a random connected peer,<br/>until collects all of them
-    loop for k in 1..n
-        BS ->> C: chain.connect_block(tip+k)
+    Note over BS: if no answer within the request timeout, or notfound —<br/>request the missing blocks from a random connected peer,<br/>unavailable from every peer — standard mode
+    loop for each received block
+        BS ->> C: chain.store_block(block)
+        alt stored
+            C -->> BS: stored
+        else mutated
+            C -->> BS: rejected {mutated, reason}
+            Note over BS: request the block from another eligible peer
+        else invalid
+            C -->> BS: rejected {consensus, reason}
+            Note over BS: consensus failure, the node stops
+        end
+    end
+    loop for k in 1..n, in height order
+        BS ->> C: chain.connect_block(hash of tip+k)
         alt Block valid and follows the tip
             Note over C: updates tip
-            C -->> BS: ok
+            C -->> BS: new tip
         else rejected
             C -->> BS: rejected {reason}
-            Note over BS: step 5
+            Note over BS: consensus failure, the node stops
         end
     end
 ```
-

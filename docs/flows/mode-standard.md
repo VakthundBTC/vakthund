@@ -142,9 +142,14 @@ if it is at most the chain work of the tip, the headers LCA + 1 ... H are not st
 
 ### Append new header
 
-If the LCA is the current tip, we can just update it sequentially. The blocks `tip + 1 ... H` are requested from the
-peer that announced H; if it does not answer, from random eligible
-peers ([peer selection](../modules/block-sync/README.md#peer-selection)).
+If the LCA is the current tip, we can just update it sequentially. This is the same procedure as the
+[IBD block download](mode-ibd.md#downloading-blocks) over the stored headers `tip + 1 ... H`
+([block download](../modules/block-sync/README.md#block-download)): blocks that are already stored are not
+requested. The others are requested from the peer that announced H, and if it does not answer — from random eligible
+peers ([peer selection](../modules/block-sync/README.md#peer-selection)). Then each received
+block is stored with `chain.store_block` and connected with `chain.connect_block` in height order. A block unavailable
+from every eligible peer ends the download ([unavailable block](../modules/block-sync/README.md#unavailable-block)): the
+headers stay stored and the blocks are requested again on the next announcement.
 
 ```mermaid
 sequenceDiagram
@@ -156,23 +161,30 @@ sequenceDiagram
     Note over BS: Has validated headers[tip + 1 ... H]
     BS ->> C: chain.store_headers(headers[tip + 1 ... H])
     C -->> BS: ok
-    BS ->> N: net.send(announcing peer, "getdata", getdata [tip + 1 ... H])
-    N -) P1: getdata
-    P1 -) N: block [tip + 1 ... H]
-    N -) BS: queue: {announcing peer, "block", block [tip + 1 ... H]}
-    Note over BS: if no answer within the request timeout, or notfound —<br/>request the missing blocks from a random connected peer,<br/>until collects all of them
-    loop for B in block [tip + 1 ... H]
+
+    loop for H in headers[tip + 1 ... H]
+        alt !has_block(H)
+            BS ->> N: net.send(announcing peer, "getdata", getdata[H])
+            N -) P1: getdata
+            P1 -) N: block[H]
+            N -) BS: queue: {announcing peer, "block", block[H]}
+            Note over BS: if no answer within the request timeout, or notfound —<br/>request the missing blocks from a random connected peer,<br/>unavailable from every peer — stop, wait for the next announcement
+        end
+
+        BS ->> C: chain.store_block(block[H])
+        C -->> BS: stored, or rejected {mutated | consensus, reason}
+    end
+
+    loop for B in tip + 1 ... H
         BS ->> C: chain.connect_block(B)
         alt Block valid and follows the tip
             Note over C: updates tip
             C -->> BS: ok
         else rejected
             C -->> BS: rejected {reason}
-            Note over BS: break, request block again
+            Note over BS: consensus failure, the node stops
         end
     end
 ```
 
-A rejected block is handled as in [IBD](mode-ibd.md#downloading-blocks).
-
-
+A rejected `store_block` or `connect_block` is handled as in [IBD](mode-ibd.md#downloading-blocks).

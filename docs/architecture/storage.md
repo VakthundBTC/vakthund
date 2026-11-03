@@ -81,14 +81,18 @@ Only valid headers are stored.
 
 - Write by batches into `headers`
 
+### Storing a block
+
+- Write to `blocks` one by one
+
 ### Connecting a block to the tip block
 
-1. `chain` writes the block to `blocks`.
-2. `chain` writes one `chainstate` batch:
-    1. save new outputs to the `coins`;
-    2. remove spent outputs from `coins`, create corresponding `undo` for the block;
-    3. set `active` at the block's height;
-    4. set `meta.tip` = the block hash and height.
+Check the block is already in `blocks`. The `chain` writes one `chainstate` batch:
+
+1. save new outputs to the `coins`;
+2. remove spent outputs from `coins`, create corresponding `undo` for the block;
+3. set `active` at the block's height;
+4. set `meta.tip` = the block hash and height.
 
 ### Disconnecting the tip block
 
