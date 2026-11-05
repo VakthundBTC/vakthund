@@ -8,9 +8,15 @@ edition = "2024"
 rust-version = "1.89"
 
 [workspace.dependencies]
-# rust-bitcoin [R15] and bitcoin-p2p-messages [R16] come from the same rust-bitcoin repository, pinned to one revision.
+# rust-bitcoin [R15] and bitcoin-p2p-messages [R16] come from the same rust-bitcoin repository,
+# pinned to one revision.
 bitcoin = { git = "https://github.com/rust-bitcoin/rust-bitcoin", rev = "677e92323b0a6b0abe069c570c2812bc3bd8737b" }
 bitcoin-p2p-messages = { git = "https://github.com/rust-bitcoin/rust-bitcoin", rev = "677e92323b0a6b0abe069c570c2812bc3bd8737b" }
+serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
+toml = "1.2.0"
 
+block-sync = { path = "crates/block-sync" }
+chain = { path = "crates/chain" }
 interfaces = { path = "crates/interfaces" }
+net = { path = "crates/net" }

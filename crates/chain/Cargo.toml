@@ -1,0 +1,9 @@
+[package]
+name = "chain"
+description = "Validation of headers and blocks, the stores of the chain and the UTXO set."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }

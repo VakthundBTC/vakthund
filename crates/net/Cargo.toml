@@ -1,0 +1,9 @@
+[package]
+name = "net"
+description = "Peer connections, message routing and peers CRUD."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
