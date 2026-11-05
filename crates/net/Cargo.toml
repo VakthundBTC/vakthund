@@ -6,4 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+interfaces = { workspace = true }
 serde = { workspace = true }
+store = { workspace = true }
