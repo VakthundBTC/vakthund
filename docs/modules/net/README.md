@@ -6,19 +6,18 @@ of the connection flow, and which module must process each message.
 
 ## State
 
-| State                                                                   | Where             |
-|-------------------------------------------------------------------------|-------------------|
-| Known peers: address, features                                          | table `peer-list` |
-| Per known peer while the process runs: id, connection state, ping times | memory            |
+| State                                                       | Where             |
+|-------------------------------------------------------------|-------------------|
+| Known peers: address, features                              | table `peer-list` |
+| Per known peer while the process runs: id, connection state | memory            |
 
 For the `peer-list` table details see ([storage.md](../../architecture/storage.md#peer-list)). In memory, per known
 peer:
 
-| Field                    | Description                                                       |
-|--------------------------|-------------------------------------------------------------------|
-| `id`                     | Peer identifier assigned by `net`, unique while the process runs. |
-| `state`                  | `known` (not connected), `connecting`, `connected`.               |
-| `last_ping`, `last_pong` | Times of the last `ping` sent and the last `pong` received.       |
+| Field   | Description                                                       |
+|---------|-------------------------------------------------------------------|
+| `id`    | Peer identifier assigned by `net`, unique while the process runs. |
+| `state` | `known` (not connected), `connecting`, `connected`.               |
 
 ---
 
@@ -33,10 +32,20 @@ inbound connections.
 ## Connection flow
 
 ```
-Connect TCP -> Assume peer connected -> Exchange features -> sendheaders
+Connect TCP -> Exchange features (version, verack) -> Peer connected -> sendheaders
 ```
 
-TBD (features)
+1. `net` sets the peer's state to `connecting` and opens a TCP connection to the peer's address.
+2. Features exchange: `net` sends `version` and the peer answers with its own `version`; each side acknowledges the
+   other's `version` with `verack`. Our `version` advertises no services, `relay = false` (no transactions) and
+   `start_height = 0` (`net` does not call `chain`). The peer's features recorded in `peer-list` are its services,
+   protocol version and user agent.
+3. After both `verack`s, `net` sets the peer's state to `connected`. Messages of other modules are sent only to
+   `connected` peers, so they never reach a peer before the handshake is complete.
+4. `net` sends `sendheaders`.
+
+If the flow does not complete within 60 seconds, or the TCP connection fails, `net` disconnects and reconnects after
+`reconnect_delay_secs`.
 
 The last step of the flow: `net` sends `sendheaders` (BIP130, empty payload). From then on the peer announces a new
 block with a `headers` message carrying the block's header, instead of an `inv` carrying only its hash. A peer still
@@ -47,8 +56,9 @@ announces with `inv` when it has more than 8 blocks to announce or does not yet 
 ## Pings
 
 Every 30 seconds `net` sends a `ping` with a random 64-bit nonce to each connected peer (BIP31). `net` responds to every
-`ping` with a `pong` carrying the same nonce. A `pong` whose nonce matches the last `ping` sets `last_pong`. If the peer
-does not send the pong – disconnect and try connecting again.
+`ping` with a `pong` carrying the same nonce. Only a `pong` whose nonce matches the last `ping` counts as an answer. If no
+matching `pong` arrives for 20 minutes (Bitcoin Core's `TIMEOUT_INTERVAL`), `net` disconnects the peer and reconnects after
+`reconnect_delay_secs`.
 
 ---
 
@@ -63,7 +73,8 @@ payloads only for `ping`, `pong` and the [connection flow](#connection-flow). Ev
 passed to its owner as raw bytes.
 
 A message is invalid when the magic is wrong, the checksum does not match, or the payload length exceeds 4 000 000
-bytes (Core's `MAX_PROTOCOL_MESSAGE_LENGTH`).
+bytes (Core's `MAX_PROTOCOL_MESSAGE_LENGTH`). A payload of `net`'s own commands that cannot be decoded is invalid as
+well. On an invalid message `net` disconnects the peer and reconnects after `reconnect_delay_secs`.
 
 ### Requesting a peer
 
@@ -84,7 +95,7 @@ bytes (Core's `MAX_PROTOCOL_MESSAGE_LENGTH`).
 | Command                                                        | Owner        |
 |----------------------------------------------------------------|--------------|
 | `ping`, `pong`                                                 | `net`        |
-| *Commands of the connection flow*                              | `net`        |
+| `version`, `verack`, `sendheaders`                             | `net`        |
 | `headers`, `block`, `inv`, `notfound`, `getheaders`, `getdata` | `block-sync` |
 | *Every other command*                                          | none in v0.1 |
 
@@ -124,6 +135,6 @@ Send the message to the peer (id) if it is `connected`. The output will be route
 
 ```toml
 [net]
-peers = []                 # peers to connect to: ["host:port", "host:port"]
+peers = []                 # peers to connect to: ["ip:port", "ip:port"]; host names are not resolved
 reconnect_delay_secs = 30  # delay before reconnecting to a disconnected peer
 ```

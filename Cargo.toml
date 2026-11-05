@@ -12,9 +12,11 @@ rust-version = "1.89"
 # pinned to one revision.
 bitcoin = { git = "https://github.com/rust-bitcoin/rust-bitcoin", rev = "677e92323b0a6b0abe069c570c2812bc3bd8737b" }
 bitcoin-p2p-messages = { git = "https://github.com/rust-bitcoin/rust-bitcoin", rev = "677e92323b0a6b0abe069c570c2812bc3bd8737b" }
+rand = "0.10.3"
 rocksdb = "0.25.0"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 toml = "1.2.0"
 
 block-sync = { path = "crates/block-sync" }
