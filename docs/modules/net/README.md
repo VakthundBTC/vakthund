@@ -14,18 +14,26 @@ of the connection flow, and which module must process each message.
 For the `peer-list` table details see ([storage.md](../../architecture/storage.md#peer-list)). In memory, per known
 peer:
 
-| Field   | Description                                                       |
-|---------|-------------------------------------------------------------------|
-| `id`    | Peer identifier assigned by `net`, unique while the process runs. |
-| `state` | `known` (not connected), `connecting`, `connected`.               |
+| Field   | Description                                                                                                    |
+|---------|----------------------------------------------------------------------------------------------------------------|
+| `id`    | Peer identifier: the first 64 bits of the SHA-256 of the peer's `peer-list` key, shown as 16 hex digits.       |
+| `state` | `known` (not connected), `connecting`, `connected`.                                                            |
+
+The `id` depends only on the address, so a peer keeps it across restarts, and a removed peer that is added again gets
+the same `id` back. Two addresses with the same `id` are an error.
 
 ---
 
 ## Peers
 
-Known peers come only from the configuration (`peers`). Configured peers are trusted. `net` keeps a connection to every
-configured peer. When a peer disconnects, `net` connects to it again after `reconnect_delay_secs`. `net` does not accept
-inbound connections.
+Known peers come from the configuration (`peers`) and from [`add_peer`](#add_peeraddress); both are stored in
+`peer-list`. Known peers are trusted: `net` requires no services and no minimum protocol version from them. On start-up
+`net` connects to every peer in `peer-list` and every configured peer; with `clear_peer_list = true` it first empties
+`peer-list`, so only the configured peers remain.
+
+After start-up, `net` connects to a peer only on [`connect`](#connectid). When a connection ends, for any reason, the
+peer's state becomes `known` and `net` does not reconnect to it. Adding and removing a peer does not connect or
+disconnect it; a removed configured peer comes back at the next start-up. `net` does not accept inbound connections.
 
 ---
 
@@ -44,8 +52,8 @@ Connect TCP -> Exchange features (version, verack) -> Peer connected -> sendhead
    `connected` peers, so they never reach a peer before the handshake is complete.
 4. `net` sends `sendheaders`.
 
-If the flow does not complete within 60 seconds, or the TCP connection fails, `net` disconnects and reconnects after
-`reconnect_delay_secs`.
+If the flow, the TCP connection included, does not complete within 60 seconds, or the TCP connection fails, `net`
+disconnects and the peer's state becomes `known`.
 
 The last step of the flow: `net` sends `sendheaders` (BIP130, empty payload). From then on the peer announces a new
 block with a `headers` message carrying the block's header, instead of an `inv` carrying only its hash. A peer still
@@ -57,8 +65,8 @@ announces with `inv` when it has more than 8 blocks to announce or does not yet 
 
 Every 30 seconds `net` sends a `ping` with a random 64-bit nonce to each connected peer (BIP31). `net` responds to every
 `ping` with a `pong` carrying the same nonce. Only a `pong` whose nonce matches the last `ping` counts as an answer. If no
-matching `pong` arrives for 20 minutes (Bitcoin Core's `TIMEOUT_INTERVAL`), `net` disconnects the peer and reconnects after
-`reconnect_delay_secs`.
+matching `pong` arrives for 20 minutes (Bitcoin Core's `TIMEOUT_INTERVAL`), `net` disconnects the peer and its state
+becomes `known`.
 
 ---
 
@@ -74,7 +82,7 @@ passed to its owner as raw bytes.
 
 A message is invalid when the magic is wrong, the checksum does not match, or the payload length exceeds 4 000 000
 bytes (Core's `MAX_PROTOCOL_MESSAGE_LENGTH`). A payload of `net`'s own commands that cannot be decoded is invalid as
-well. On an invalid message `net` disconnects the peer and reconnects after `reconnect_delay_secs`.
+well. On an invalid message `net` disconnects the peer and its state becomes `known`.
 
 ### Requesting a peer
 
@@ -103,7 +111,8 @@ well. On an invalid message `net` disconnects the peer and reconnects after `rec
 
 ## Interface
 
-Direct calls. In v0.1 the only caller is `block-sync`.
+Direct calls. In v0.1 the only caller is `block-sync`. Every call except `get_peers` and `get_peer` fails for an unknown
+peer id.
 
 ### get_peers(state?)
 
@@ -113,21 +122,29 @@ Returns known peers: `peer-list` rows with their in-memory fields
 
 Return the peer from `peer-list` with its in-memory fields, or not found
 
-### add_peer(...), remove_peer(id)
+### add_peer(address)
 
-Add or remove peer to the `peer-list`.
+Adds the peer to `peer-list` as `known`; does not connect to it. For an address that is already known, returns that
+peer.
+
+### remove_peer(id)
+
+Removes the peer from `peer-list`. Fails for a peer that is `connecting` or `connected`: it must be disconnected first.
+Messages the peer sent before the removal may still be in the queue; if the peer is added again, they carry its `id` as
+well.
 
 ### connect(id)
 
-Starts the connection flow with peer (id)
+Starts the connection flow with the peer if it is `known`; does nothing if it is `connecting` or `connected`.
 
 ### disconnect(id)
 
-Loses the connection with peer (id); the state becomes `known`
+Stops the connection with the peer; its state becomes `known` and it stays in `peer-list`. Does nothing if it is
+`known`.
 
 ### send(id, command, payload)
 
-Send the message to the peer (id) if it is `connected`. The output will be routed to the queue.
+Sends the message to the peer if it is `connected`; fails otherwise. The answer, if any, is routed to the queue.
 
 ---
 
@@ -136,5 +153,5 @@ Send the message to the peer (id) if it is `connected`. The output will be route
 ```toml
 [net]
 peers = []                 # peers to connect to: ["ip:port", "ip:port"]; host names are not resolved
-reconnect_delay_secs = 30  # delay before reconnecting to a disconnected peer
+clear_peer_list = false    # empty peer-list at start-up, so only the configured peers remain
 ```

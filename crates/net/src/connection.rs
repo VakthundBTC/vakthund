@@ -1,5 +1,5 @@
 //! One connection to a peer (`docs/modules/net/README.md`, "Connection flow", "Pings"). The task
-//! reports what happens as [`Event`]s and never changes peer state itself.
+//! reports what happens as [`Report`]s and never changes peer state itself.
 
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -26,27 +26,46 @@ use crate::frame::{read_frame, write_frame};
 use crate::ping::PingManager;
 use crate::routing::{Command, Owner};
 
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
+/// For the TCP connection and the features exchange together.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 /// 70016, the version Bitcoin Core sends.
 const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::WTXID_RELAY_VERSION;
 const USER_AGENT: &str = concat!("/vakthund:", env!("CARGO_PKG_VERSION"), "/");
 
 type Frame = (CommandString, Vec<u8>);
 
+/// `connection` tells the reports of an earlier connection to the same peer apart: a removed and
+/// re-added peer keeps its id.
+#[derive(Debug)]
+pub struct Report {
+    pub peer: PeerId,
+    pub connection: u64,
+    pub event: Event,
+}
+
 #[derive(Debug)]
 pub enum Event {
     /// The features exchange is complete.
     Connected(PeerFeatures),
     /// The task has ended.
-    Disconnected(Error),
+    Disconnected(
+        #[expect(dead_code, reason = "for logging, which the node does not have yet")] Error,
+    ),
+    /// The task has ended because the block-sync queue is full: a node failure.
+    QueueFull,
 }
 
 pub struct ConnectionHandle {
+    number: u64,
     outgoing: mpsc::UnboundedSender<Frame>,
     task: JoinHandle<()>,
 }
 
 impl ConnectionHandle {
+    pub fn number(&self) -> u64 {
+        self.number
+    }
+
     /// Queues the message; it is written after the features exchange.
     pub fn send(&self, command: CommandString, payload: Vec<u8>) -> Result<(), Error> {
         self.outgoing
@@ -60,32 +79,43 @@ impl ConnectionHandle {
     }
 }
 
+/// `number` must differ from the numbers of the peer's earlier connections.
 pub fn spawn<Q: MessageQueue + 'static>(
     peer: PeerId,
+    number: u64,
     address: SocketAddr,
     magic: Magic,
     queue: Arc<Q>,
-    events: mpsc::UnboundedSender<(PeerId, Event)>,
+    reports: mpsc::UnboundedSender<Report>,
 ) -> ConnectionHandle {
     let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
     let connection = Connection {
         peer,
+        number,
         magic,
         queue,
-        events,
+        reports,
     };
     let task = tokio::spawn(async move {
-        let Err(reason) = connection.run(address, outgoing_rx).await;
-        connection.report(Event::Disconnected(reason));
+        let event = match connection.run(address, outgoing_rx).await {
+            Err(Error::QueueFull) => Event::QueueFull,
+            Err(error) => Event::Disconnected(error),
+        };
+        connection.report(event);
     });
-    ConnectionHandle { outgoing, task }
+    ConnectionHandle {
+        number,
+        outgoing,
+        task,
+    }
 }
 
 struct Connection<Q> {
     peer: PeerId,
+    number: u64,
     magic: Magic,
     queue: Arc<Q>,
-    events: mpsc::UnboundedSender<(PeerId, Event)>,
+    reports: mpsc::UnboundedSender<Report>,
 }
 
 impl<Q: MessageQueue> Connection<Q> {
@@ -94,10 +124,14 @@ impl<Q: MessageQueue> Connection<Q> {
         address: SocketAddr,
         mut outgoing: mpsc::UnboundedReceiver<Frame>,
     ) -> Result<Infallible, Error> {
-        let mut stream = TcpStream::connect(address).await?;
-        let features = time::timeout(HANDSHAKE_TIMEOUT, self.handshake(&mut stream, address))
+        let connecting = async {
+            let mut stream = TcpStream::connect(address).await?;
+            let features = self.handshake(&mut stream, address).await?;
+            Ok::<_, Error>((stream, features))
+        };
+        let (stream, features) = time::timeout(CONNECT_TIMEOUT, connecting)
             .await
-            .map_err(|_| Error::HandshakeTimeout)??;
+            .map_err(|_| Error::ConnectTimeout)??;
         self.report(Event::Connected(features));
 
         let (reader, mut writer) = stream.into_split();
@@ -156,7 +190,8 @@ impl<Q: MessageQueue> Connection<Q> {
         }
     }
 
-    /// Answers pings, passes pongs to the [`PingManager`] and routes block-sync messages to its queue.
+    /// Answers pings, passes pongs to the [`PingManager`] and routes block-sync messages to its
+    /// queue.
     async fn handle_command(
         &self,
         writer: &mut OwnedWriteHalf,
@@ -206,7 +241,12 @@ impl<Q: MessageQueue> Connection<Q> {
 
     fn report(&self, event: Event) {
         // The receiver is gone only when net is shutting down.
-        let _ = self.events.send((self.peer, event));
+        let report = Report {
+            peer: self.peer,
+            connection: self.number,
+            event,
+        };
+        let _ = self.reports.send(report);
     }
 }
 

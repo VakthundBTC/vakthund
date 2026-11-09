@@ -520,9 +520,11 @@ dependencies = [
  "bitcoin",
  "block-sync",
  "chain",
+ "interfaces",
  "net",
  "serde",
  "thiserror",
+ "tokio",
  "toml",
 ]
 

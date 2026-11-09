@@ -1,14 +1,28 @@
 //! Interface of `net` (`docs/modules/net/README.md`).
 
+use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
 
 use bitcoin_p2p_messages::ServiceFlags;
 use bitcoin_p2p_messages::message::CommandString;
 
-/// Assigned by `net`; unique while the process runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Derived by `net` from the peer's address, so it stays the same across restarts. Shown as 16
+/// hex digits.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PeerId(pub u64);
+
+impl fmt::Display for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
+impl fmt::Debug for PeerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PeerId({self})")
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PeerState {
@@ -35,7 +49,7 @@ pub struct Peer {
     pub state: PeerState,
 }
 
-/// TBD-11: the results for a peer in the wrong state are not specified yet.
+/// Every call except `get_peers` and `get_peer` fails for an unknown peer id.
 pub trait Net: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 
@@ -49,22 +63,25 @@ pub trait Net: Send + Sync {
         id: PeerId,
     ) -> impl Future<Output = Result<Option<Peer>, Self::Error>> + Send;
 
-    /// TBD-11: the arguments are not specified yet.
+    /// Stores the peer in `peer-list` as `Known`; does not connect. A known address returns its
+    /// peer.
     fn add_peer(
         &self,
         address: SocketAddr,
-        features: Option<PeerFeatures>,
     ) -> impl Future<Output = Result<PeerId, Self::Error>> + Send;
 
+    /// Removes the peer from `peer-list`. Fails for a peer that is not `Known`: disconnect first.
     fn remove_peer(&self, id: PeerId) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Starts the connection flow with the peer.
+    /// Starts the connection flow if the peer is `Known`; does nothing otherwise.
     fn connect(&self, id: PeerId) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    /// Stops the connection; the peer becomes `Known` and stays in `peer-list`. Does nothing for a
+    /// `Known` peer.
     fn disconnect(&self, id: PeerId) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Only for a connected peer. The payload is sent unchanged; the peer's answer, if any,
-    /// arrives through the queue of the command's owner.
+    /// Fails for a peer that is not `Connected`. The payload is sent unchanged; the peer's answer,
+    /// if any, arrives through the queue of the command's owner.
     fn send(
         &self,
         id: PeerId,

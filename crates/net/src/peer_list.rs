@@ -2,15 +2,21 @@
 
 use std::net::SocketAddr;
 
+use bitcoin::hashes::sha256;
 use bitcoin_p2p_messages::ServiceFlags;
-use interfaces::net::PeerFeatures;
+use interfaces::net::{PeerFeatures, PeerId};
 use store::{DecodeError, Profile, Table};
 
-#[expect(
-    dead_code,
-    reason = "used by the net service, which is not written yet"
-)]
 pub struct PeerList;
+
+/// The first 64 bits of the SHA-256 of the address's key encoding. Changing that encoding would
+/// change every id.
+pub fn peer_id(address: &SocketAddr) -> PeerId {
+    let hash = sha256::hash(&PeerList::encode_key(address)).to_byte_array();
+    PeerId(u64::from_be_bytes([
+        hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+    ]))
+}
 
 impl Table for PeerList {
     const NAME: &'static str = "peer-list";
