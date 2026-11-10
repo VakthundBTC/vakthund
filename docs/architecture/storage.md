@@ -9,6 +9,7 @@ A **store** is the unit of atomicity: a set of tables written together in all-or
   be replaced independently.
 - A store belongs to exactly one module.
 - There is no atomicity across stores. Consistency across stores is defined by [write ordering](#write-ordering).
+- A failed read or write of a store is a node failure, and the node stops.
 
 | Module | Store        | Tables                            | Path                                    |
 |--------|--------------|-----------------------------------|-----------------------------------------|

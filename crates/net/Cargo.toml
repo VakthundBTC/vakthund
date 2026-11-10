@@ -1,0 +1,16 @@
+[package]
+name = "net"
+description = "Peer connections, message routing and peers CRUD."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bitcoin = { workspace = true }
+bitcoin-p2p-messages = { workspace = true }
+interfaces = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+store = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
