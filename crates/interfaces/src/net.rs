@@ -70,14 +70,15 @@ pub trait Net: Send + Sync {
         address: SocketAddr,
     ) -> impl Future<Output = Result<PeerId, Self::Error>> + Send;
 
-    /// Removes the peer from `peer-list`. Fails for a peer that is not `Known`: disconnect first.
+    /// Removes the peer from `peer-list`. Fails for a peer that is not `Known` or that `net` is
+    /// waiting to reconnect to: disconnect first.
     fn remove_peer(&self, id: PeerId) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Starts the connection flow if the peer is `Known`; does nothing otherwise.
+    /// Starts the connection flow if the peer is `Known` and `net` is not waiting to reconnect to
+    /// it; does nothing otherwise.
     fn connect(&self, id: PeerId) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Stops the connection; the peer becomes `Known` and stays in `peer-list`. Does nothing for a
-    /// `Known` peer.
+    /// Stops the connection and the reconnects; the peer becomes `Known` and stays in `peer-list`.
     fn disconnect(&self, id: PeerId) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Fails for a peer that is not `Connected`. The payload is sent unchanged; the peer's answer,

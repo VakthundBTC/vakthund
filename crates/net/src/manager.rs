@@ -6,6 +6,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bitcoin::Network;
 use bitcoin_p2p_messages::Magic;
@@ -22,6 +23,7 @@ use crate::peer_list::{PeerList, peer_id};
 
 pub struct NetManager<Q> {
     magic: Magic,
+    reconnect_delay: Duration,
     queue: Arc<Q>,
     store: Store,
     peers: Mutex<PeerRegistry>,
@@ -41,6 +43,7 @@ struct PeerEntry {
     address: SocketAddr,
     features: Option<PeerFeatures>,
     state: PeerState,
+    /// Kept while the task waits to reconnect, so the peer is `Known` with a connection.
     connection: Option<ConnectionHandle>,
 }
 
@@ -112,6 +115,7 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
         let (reports_tx, reports) = mpsc::unbounded_channel();
         Ok(Self {
             magic,
+            reconnect_delay: Duration::from_secs(config.reconnect_delay_secs),
             queue,
             store,
             peers: Mutex::new(peers),
@@ -131,7 +135,7 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
                 if peers
                     .entries
                     .get(&id)
-                    .is_some_and(|entry| entry.state == PeerState::Known)
+                    .is_some_and(|entry| entry.connection.is_none())
                 {
                     self.start(&mut peers, id)?;
                 }
@@ -160,16 +164,14 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
             return Ok(());
         }
         match event {
+            Event::Reconnecting => entry.state = PeerState::Connecting,
             Event::Connected(features) => {
                 self.store
                     .put::<PeerList>(&entry.address, &Some(features.clone()))?;
                 entry.features = Some(features);
                 entry.state = PeerState::Connected;
             }
-            Event::Disconnected(_) => {
-                entry.state = PeerState::Known;
-                entry.connection = None;
-            }
+            Event::Disconnected(_) => entry.state = PeerState::Known,
             Event::QueueFull => return Err(Error::QueueFull),
         }
         Ok(())
@@ -184,6 +186,7 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
             number,
             entry.address,
             self.magic,
+            self.reconnect_delay,
             Arc::clone(&self.queue),
             self.reports_tx.clone(),
         );
@@ -224,8 +227,8 @@ impl<Q: MessageQueue + 'static> Net for NetManager<Q> {
     async fn remove_peer(&self, id: PeerId) -> Result<(), Error> {
         let mut peers = self.peers.lock().await;
         let entry = peers.get_mut(id)?;
-        // Removing the entry would lose the running connection's handle.
-        if entry.state != PeerState::Known {
+        // Also a peer waiting to reconnect: removing the entry would lose its task's handle.
+        if entry.connection.is_some() {
             return Err(Error::StillConnected(id));
         }
         self.store.delete::<PeerList>(&entry.address)?;
@@ -235,7 +238,8 @@ impl<Q: MessageQueue + 'static> Net for NetManager<Q> {
 
     async fn connect(&self, id: PeerId) -> Result<(), Error> {
         let mut peers = self.peers.lock().await;
-        if peers.get_mut(id)?.state == PeerState::Known {
+        // A peer with a connection is connecting, connected, or waiting to reconnect.
+        if peers.get_mut(id)?.connection.is_none() {
             self.start(&mut peers, id)?;
         }
         Ok(())

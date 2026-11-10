@@ -46,7 +46,8 @@ sequenceDiagram
 
 ### Missing pong
 
-If the pong is missing we disconnect the peer; its state becomes `known`.
+If the pong is missing we disconnect the peer; its state becomes `known` and `net` reconnects after
+`reconnect_delay_secs`.
 
 ---
 

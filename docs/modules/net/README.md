@@ -31,9 +31,12 @@ Known peers come from the configuration (`peers`) and from [`add_peer`](#add_pee
 `net` connects to every peer in `peer-list` and every configured peer; with `clear_peer_list = true` it first empties
 `peer-list`, so only the configured peers remain.
 
-After start-up, `net` connects to a peer only on [`connect`](#connectid). When a connection ends, for any reason, the
-peer's state becomes `known` and `net` does not reconnect to it. Adding and removing a peer does not connect or
-disconnect it; a removed configured peer comes back at the next start-up. `net` does not accept inbound connections.
+After start-up, `net` connects to a peer only on [`connect`](#connectid). From then on `net` keeps the peer connected:
+when the connection ends on its own (the [connection flow](#connection-flow) fails, the [pong](#pings) is missing, the
+peer sends an [invalid message](#message-exchange) or closes the connection), the peer's state becomes `known` and `net`
+starts the connection flow again after `reconnect_delay_secs`. This goes on until [`disconnect`](#disconnectid).
+Adding a peer does not connect it; a removed configured peer comes back at the next
+start-up. `net` does not accept inbound connections.
 
 ---
 
@@ -53,7 +56,7 @@ Connect TCP -> Exchange features (version, verack) -> Peer connected -> sendhead
 4. `net` sends `sendheaders`.
 
 If the flow, the TCP connection included, does not complete within 60 seconds, or the TCP connection fails, `net`
-disconnects and the peer's state becomes `known`.
+disconnects, the peer's state becomes `known`, and `net` [reconnects](#peers) after `reconnect_delay_secs`.
 
 The last step of the flow: `net` sends `sendheaders` (BIP130, empty payload). From then on the peer announces a new
 block with a `headers` message carrying the block's header, instead of an `inv` carrying only its hash. A peer still
@@ -65,8 +68,8 @@ announces with `inv` when it has more than 8 blocks to announce or does not yet 
 
 Every 30 seconds `net` sends a `ping` with a random 64-bit nonce to each connected peer (BIP31). `net` responds to every
 `ping` with a `pong` carrying the same nonce. Only a `pong` whose nonce matches the last `ping` counts as an answer. If no
-matching `pong` arrives for 20 minutes (Bitcoin Core's `TIMEOUT_INTERVAL`), `net` disconnects the peer and its state
-becomes `known`.
+matching `pong` arrives for 20 minutes (Bitcoin Core's `TIMEOUT_INTERVAL`), `net` disconnects the peer, its state
+becomes `known`, and `net` [reconnects](#peers) after `reconnect_delay_secs`.
 
 ---
 
@@ -82,7 +85,8 @@ passed to its owner as raw bytes.
 
 A message is invalid when the magic is wrong, the checksum does not match, or the payload length exceeds 4 000 000
 bytes (Core's `MAX_PROTOCOL_MESSAGE_LENGTH`). A payload of `net`'s own commands that cannot be decoded is invalid as
-well. On an invalid message `net` disconnects the peer and its state becomes `known`.
+well. On an invalid message `net` disconnects the peer, its state becomes `known`, and `net` [reconnects](#peers)
+after `reconnect_delay_secs`.
 
 ### Requesting a peer
 
@@ -129,18 +133,20 @@ peer.
 
 ### remove_peer(id)
 
-Removes the peer from `peer-list`. Fails for a peer that is `connecting` or `connected`: it must be disconnected first.
+Removes the peer from `peer-list`. Fails for a peer that is `connecting` or `connected`, or that `net` is waiting to
+reconnect to: it must be disconnected first.
 Messages the peer sent before the removal may still be in the queue; if the peer is added again, they carry its `id` as
 well.
 
 ### connect(id)
 
-Starts the connection flow with the peer if it is `known`; does nothing if it is `connecting` or `connected`.
+Starts the connection flow with the peer if it is `known`; does nothing if it is `connecting` or `connected`, or if
+`net` is waiting to reconnect to it.
 
 ### disconnect(id)
 
-Stops the connection with the peer; its state becomes `known` and it stays in `peer-list`. Does nothing if it is
-`known`.
+Stops the connection with the peer and the reconnects to it; its state becomes `known` and it stays in `peer-list`.
+Does nothing for a `known` peer that `net` is not reconnecting to.
 
 ### send(id, command, payload)
 
@@ -154,4 +160,5 @@ Sends the message to the peer if it is `connected`; fails otherwise. The answer,
 [net]
 peers = []                 # peers to connect to: ["ip:port", "ip:port"]; host names are not resolved
 clear_peer_list = false    # empty peer-list at start-up, so only the configured peers remain
+reconnect_delay_secs = 30  # delay before reconnecting to a peer whose connection ended
 ```

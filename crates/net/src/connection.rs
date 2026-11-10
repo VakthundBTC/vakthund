@@ -34,8 +34,8 @@ const USER_AGENT: &str = concat!("/vakthund:", env!("CARGO_PKG_VERSION"), "/");
 
 type Frame = (CommandString, Vec<u8>);
 
-/// `connection` tells the reports of an earlier connection to the same peer apart: a removed and
-/// re-added peer keeps its id.
+/// `connection` tells the reports of an earlier connection task for the same peer apart: a removed
+/// and re-added peer keeps its id.
 #[derive(Debug)]
 pub struct Report {
     pub peer: PeerId,
@@ -45,9 +45,11 @@ pub struct Report {
 
 #[derive(Debug)]
 pub enum Event {
+    /// The connection flow has started again after the delay; the first attempt is not reported.
+    Reconnecting,
     /// The features exchange is complete.
     Connected(PeerFeatures),
-    /// The task has ended.
+    /// The connection has ended; the task reconnects after the delay.
     Disconnected(
         #[expect(dead_code, reason = "for logging, which the node does not have yet")] Error,
     ),
@@ -73,22 +75,23 @@ impl ConnectionHandle {
             .map_err(|_| Error::Closed)
     }
 
-    /// Ends the connection without a `Disconnected` event.
+    /// Ends the connection and the reconnects without a `Disconnected` event.
     pub fn stop(self) {
         self.task.abort();
     }
 }
 
-/// `number` must differ from the numbers of the peer's earlier connections.
+/// `number` must differ from the numbers of the peer's earlier connection tasks.
 pub fn spawn<Q: MessageQueue + 'static>(
     peer: PeerId,
     number: u64,
     address: SocketAddr,
     magic: Magic,
+    reconnect_delay: Duration,
     queue: Arc<Q>,
     reports: mpsc::UnboundedSender<Report>,
 ) -> ConnectionHandle {
-    let (outgoing, outgoing_rx) = mpsc::unbounded_channel();
+    let (outgoing, mut outgoing_rx) = mpsc::unbounded_channel();
     let connection = Connection {
         peer,
         number,
@@ -97,11 +100,18 @@ pub fn spawn<Q: MessageQueue + 'static>(
         reports,
     };
     let task = tokio::spawn(async move {
-        let event = match connection.run(address, outgoing_rx).await {
-            Err(Error::QueueFull) => Event::QueueFull,
-            Err(error) => Event::Disconnected(error),
-        };
-        connection.report(event);
+        loop {
+            let Err(error) = connection.run(address, &mut outgoing_rx).await;
+            if let Error::QueueFull = error {
+                connection.report(Event::QueueFull);
+                return;
+            }
+            connection.report(Event::Disconnected(error));
+            time::sleep(reconnect_delay).await;
+            // Messages for the connection that ended are not sent on the next one.
+            while outgoing_rx.try_recv().is_ok() {}
+            connection.report(Event::Reconnecting);
+        }
     });
     ConnectionHandle {
         number,
@@ -122,7 +132,7 @@ impl<Q: MessageQueue> Connection<Q> {
     async fn run(
         &self,
         address: SocketAddr,
-        mut outgoing: mpsc::UnboundedReceiver<Frame>,
+        outgoing: &mut mpsc::UnboundedReceiver<Frame>,
     ) -> Result<Infallible, Error> {
         let connecting = async {
             let mut stream = TcpStream::connect(address).await?;
