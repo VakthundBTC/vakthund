@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use interfaces::queue::{MessageQueue, QueueFull, RoutedMessage};
+use interfaces::queue::{NetEvent, Queue, QueueFull};
 use net::NetManager;
 use node::config::Config;
 
@@ -18,14 +18,16 @@ enum NodeError {
 /// them.
 struct PrintQueue;
 
-impl MessageQueue for PrintQueue {
-    fn push(&self, message: RoutedMessage) -> Result<(), QueueFull> {
-        println!(
-            "{:?}: {} ({} bytes)",
-            message.peer,
-            message.command,
-            message.payload.len()
-        );
+impl Queue<NetEvent> for PrintQueue {
+    fn push(&self, event: NetEvent) -> Result<(), QueueFull> {
+        if let NetEvent::Message(message) = event {
+            println!(
+                "{:?}: {} ({} bytes)",
+                message.peer,
+                message.command,
+                message.payload.len()
+            );
+        }
         Ok(())
     }
 }

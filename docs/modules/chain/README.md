@@ -159,7 +159,15 @@ Rejections carry Bitcoin Core's reject reason (`high-hash`, `bad-diffbits`, `bad
 
 ## Interface
 
-Direct calls. In v0.1 the only caller is `block-sync`. Calls that write are executed one at a time.
+Requests and answers through queues. A client pushes a request `{id, reply, call}` into the chain queue; `chain` pushes
+the answer `{id, result}` into the `reply` queue. The client chooses the `id` and matches the answer by it. In v0.1 the
+only client is `block-sync`.
+
+- Requests that write run one at a time, in the order `chain` receives them.
+- A request that reads sees every write `chain` received before it.
+- Answers may arrive in any order.
+
+The tables below list the calls; the output is the answer's result.
 
 ### Headers
 

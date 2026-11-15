@@ -26,7 +26,8 @@ A reorg proceeds as follows, with k = tip − height(A):
    block is unavailable from every eligible peer, the reorg is
    abandoned ([unavailable block](../modules/block-sync/README.md#unavailable-block)): the headers and the blocks stored
    so far stay, nothing else changes.
-3. When every block of (A+1)..B is stored, `block-sync` enters reorg mode.
+3. When every block of (A+1)..B is stored, `block-sync` enters reorg mode and drops the other candidates, unless
+   another candidate was connected first ([candidates](../modules/block-sync/README.md#candidates)).
 4. `block-sync` calls `chain.disconnect_tip` k times. The tip block is then A.
 5. `block-sync` calls `chain.connect_block` for (A+1)..B in height order. A rejected block is a consensus failure:
    `block-sync` reports it and the node stops.

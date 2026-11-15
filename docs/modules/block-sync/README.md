@@ -31,8 +31,9 @@ batches (until included into chain), etc.
 
 ### Communication
 
-The module accepts input messages from queue filled by `net`. It also has timers for
-[request timeouts](#request-timeout). The module may call directly both `net` and `chain` modules:
+The module reads two queues: its queue, which `net` fills with routed messages and peer events, and its answer queue,
+into which `chain` pushes the answers to its requests. It also has timers for [request timeouts](#request-timeout). It
+calls `net` directly and sends requests to `chain` ([interface](../chain/README.md#interface)):
 
 | Module  | Calls                                                                                                               |
 |---------|---------------------------------------------------------------------------------------------------------------------|
@@ -56,12 +57,26 @@ what a failed request means for it: header download in [IBD](../../flows/mode-ib
 download in [peer selection](#peer-selection), the LCA search in
 [standard mode](../../flows/mode-standard.md#processing-headers).
 
+### Candidates
+
+In standard mode a candidate is a chain announced by a peer that the node may extend its chain with or switch to. It
+starts as the [LCA search](../../flows/mode-standard.md#processing-headers) with that peer, and continues as the block
+download of `LCA + 1 ... H`: an [appended chain](../../flows/mode-standard.md#append-new-header) when the LCA is the
+tip, an [alternative chain](../../flows/mode-reorg.md) when it is below the tip and H has more chain work than the tip.
+A newer announcement from the same peer replaces its candidate.
+
+Several candidates may download at the same time, usually the same chain announced by several peers; a block already
+requested for one candidate is not requested again for another. The first candidate whose blocks are all stored is
+connected: in height order for an appended chain, through reorg mode for an alternative chain. Then every other
+candidate is dropped. Headers and blocks stored for them stay; a peer whose chain still has more work announces it
+again with its next block, and the stored blocks are not downloaded again (`has_block`).
+
 --- 
 
 ## Interface
 
-`block-sync` exposes no calls to other modules. Its only input from other modules is its queue, which they reach
-through a push-only interface: they can push a message, but cannot read the queue.
+`block-sync` exposes no calls to other modules. Its only inputs from other modules are its queue and its answer queue,
+which they reach through a push-only interface: they can push an item, but cannot read the queue.
 
 ---
 

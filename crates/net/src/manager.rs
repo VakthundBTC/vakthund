@@ -12,7 +12,7 @@ use bitcoin::Network;
 use bitcoin_p2p_messages::Magic;
 use bitcoin_p2p_messages::message::CommandString;
 use interfaces::net::{Net, Peer, PeerFeatures, PeerId, PeerState};
-use interfaces::queue::MessageQueue;
+use interfaces::queue::{NetEvent, Queue};
 use store::{Store, TableSpec};
 use tokio::sync::{Mutex, mpsc};
 
@@ -78,7 +78,7 @@ impl PeerRegistry {
     }
 }
 
-impl<Q: MessageQueue + 'static> NetManager<Q> {
+impl<Q: Queue<NetEvent> + 'static> NetManager<Q> {
     /// Opens `peer-list` under `<dir>/net/` and adds the configured peers to it. Nothing connects
     /// until [`NetManager::run`].
     pub fn open(
@@ -196,7 +196,7 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
     }
 }
 
-impl<Q: MessageQueue + 'static> Net for NetManager<Q> {
+impl<Q: Queue<NetEvent> + 'static> Net for NetManager<Q> {
     type Error = Error;
 
     async fn get_peers(&self, state: Option<PeerState>) -> Result<Vec<Peer>, Error> {

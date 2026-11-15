@@ -95,9 +95,10 @@ We first try searching its parent in the `headers` table. If the entry exists, w
 need (i.e. height). Otherwise, we start searching the last common ancestor (LCA). A block hash from an `inv` has no
 known parent and starts the LCA search directly ([processing inventory](#processing-inventory)).
 
-The LCA search is a loop of `getheaders` requests to the peer that announced H. The first request carries a full locator
-of the active chain, each next request a locator consisting of the last header received; every request carries
-`hash_stop = H`. After each `headers` answer:
+The LCA search runs per announcing peer, several at the same time
+([candidates](../modules/block-sync/README.md#candidates)). It is a loop of `getheaders` requests to the peer that
+announced H. The first request carries a full locator of the active chain, each next request a locator consisting of
+the last header received; every request carries `hash_stop = H`. After each `headers` answer:
 
 - if the answer has 2000 headers and does not end with H, the search continues with the next request;
 - if the answer ends with H, the search is complete: the collected headers are `LCA + 1 ... H`;
@@ -149,7 +150,8 @@ requested. The others are requested from the peer that announced H, and if it do
 peers ([peer selection](../modules/block-sync/README.md#peer-selection)). Then each received
 block is stored with `chain.store_block` and connected with `chain.connect_block` in height order. A block unavailable
 from every eligible peer ends the download ([unavailable block](../modules/block-sync/README.md#unavailable-block)): the
-headers stay stored and the blocks are requested again on the next announcement.
+headers stay stored and the blocks are requested again on the next announcement. A download is also dropped when
+another candidate is connected first ([candidates](../modules/block-sync/README.md#candidates)).
 
 ```mermaid
 sequenceDiagram

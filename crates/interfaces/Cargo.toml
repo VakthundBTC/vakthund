@@ -1,6 +1,6 @@
 [package]
 name = "interfaces"
-description = "Interfaces between the Vakthund modules: the calls of net and chain, and the block-sync queue."
+description = "Interfaces between the Vakthund modules: the calls of net, the requests of chain, and the queues."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
