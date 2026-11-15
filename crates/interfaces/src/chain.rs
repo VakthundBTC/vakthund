@@ -1,11 +1,14 @@
-//! Interface of `chain` (`docs/modules/chain/README.md`). Calls that write run one at a time.
+//! Interface of `chain` (`docs/modules/chain/README.md`, "Interface"): requests on the chain queue,
+//! answers in the queue each request names.
 
 use std::fmt;
-use std::future::Future;
+use std::sync::Arc;
 
 use bitcoin::block::Header;
 use bitcoin::pow::Work;
 use bitcoin::{Block, BlockHash, BlockHeight, OutPoint, TxOut};
+
+use crate::queue::Queue;
 
 /// Bitcoin Core's reject reason of the failed check, e.g. `high-hash`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -72,63 +75,73 @@ pub enum ChainError {
     Storage(String),
 }
 
-/// Every call can also return `Storage`. Every other error is a rejection that writes nothing.
-pub trait Chain: Send + Sync {
+/// Chosen by the client; `chain` echoes it in the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ChainRequestId(pub u64);
+
+/// Requests that write run one at a time, in the order `chain` receives them. A request that reads
+/// sees every write received before it. Answers may arrive in any order.
+pub struct ChainRequest {
+    pub id: ChainRequestId,
+    pub reply: Arc<dyn Queue<ChainResponse>>,
+    pub call: ChainCall,
+}
+
+/// Every call can also fail with `Storage`. Every other error is a rejection that writes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainCall {
     /// Headers in chain order, each extending the previous. Writes nothing.
     ///
     /// Errors: `NotConnected`, `InvalidHeader`.
-    fn validate_headers(
-        &self,
-        headers: Vec<Header>,
-    ) -> impl Future<Output = Result<ValidatedHeaders, ChainError>> + Send;
-
-    /// Only for headers that `validate_headers` accepted.
+    ValidateHeaders(Vec<Header>),
+    /// Only for headers that `ValidateHeaders` accepted.
     ///
     /// Errors: `NotConnected`.
-    fn store_headers(
-        &self,
-        headers: Vec<Header>,
-    ) -> impl Future<Output = Result<(), ChainError>> + Send;
-
-    fn header(
-        &self,
-        hash: BlockHash,
-    ) -> impl Future<Output = Result<Option<HeaderEntry>, ChainError>> + Send;
-
+    StoreHeaders(Vec<Header>),
+    Header(BlockHash),
     /// The header at this height on the active chain.
-    fn header_at(
-        &self,
-        height: BlockHeight,
-    ) -> impl Future<Output = Result<Option<HeaderEntry>, ChainError>> + Send;
-
+    HeaderAt(BlockHeight),
+    /// The block locator of the active chain (`docs/flows/mode-standard.md`, "Block locator"),
+    /// built against one tip: newest first, ending with genesis.
+    Locator,
     /// Runs the mutation and basic checks. Storing an already stored block succeeds.
     ///
     /// Errors: `UnknownHeader`, `Mutated`, `Consensus`.
-    fn store_block(&self, block: Block) -> impl Future<Output = Result<(), ChainError>> + Send;
-
-    /// Runs the checks with context and moves the tip to the block. Returns the new tip.
+    StoreBlock(Block),
+    /// Runs the checks with context and moves the tip to the block.
     ///
     /// Errors: `UnknownHeader`, `NoBlock`, `NotSequential`, `Consensus`. `Consensus` here is
     /// always a consensus failure: the block passed the mutation checks when it was stored.
-    fn connect_block(
-        &self,
-        hash: BlockHash,
-    ) -> impl Future<Output = Result<Tip, ChainError>> + Send;
-
-    fn block(
-        &self,
-        hash: BlockHash,
-    ) -> impl Future<Output = Result<Option<Block>, ChainError>> + Send;
-
-    fn tip(&self) -> impl Future<Output = Result<Tip, ChainError>> + Send;
-
-    /// Reverts the tip block and moves the tip to its parent. Returns the new tip.
+    ConnectBlock(BlockHash),
+    Block(BlockHash),
+    Tip,
+    /// Reverts the tip block and moves the tip to its parent.
     ///
     /// Errors: `TipIsGenesis`.
-    fn disconnect_tip(&self) -> impl Future<Output = Result<Tip, ChainError>> + Send;
+    DisconnectTip,
+    Coin(OutPoint),
+}
 
-    fn coin(
-        &self,
-        outpoint: OutPoint,
-    ) -> impl Future<Output = Result<Option<Coin>, ChainError>> + Send;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainResponse {
+    pub id: ChainRequestId,
+    pub result: ChainResult,
+}
+
+/// One variant per [`ChainCall`], so an answer cannot carry another call's result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainResult {
+    ValidateHeaders(Result<ValidatedHeaders, ChainError>),
+    StoreHeaders(Result<(), ChainError>),
+    Header(Result<Option<HeaderEntry>, ChainError>),
+    HeaderAt(Result<Option<HeaderEntry>, ChainError>),
+    Locator(Result<Vec<BlockHash>, ChainError>),
+    StoreBlock(Result<(), ChainError>),
+    /// The new tip.
+    ConnectBlock(Result<Tip, ChainError>),
+    Block(Result<Option<Block>, ChainError>),
+    Tip(Result<Tip, ChainError>),
+    /// The new tip.
+    DisconnectTip(Result<Tip, ChainError>),
+    Coin(Result<Option<Coin>, ChainError>),
 }

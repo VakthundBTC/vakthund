@@ -159,7 +159,15 @@ Rejections carry Bitcoin Core's reject reason (`high-hash`, `bad-diffbits`, `bad
 
 ## Interface
 
-Direct calls. In v0.1 the only caller is `block-sync`. Calls that write are executed one at a time.
+Requests and answers through queues. A client pushes a request `{id, reply, call}` into the chain queue; `chain` pushes
+the answer `{id, result}` into the `reply` queue. The client chooses the `id` and matches the answer by it. In v0.1 the
+only client is `block-sync`.
+
+- Requests that write run one at a time, in the order `chain` receives them.
+- A request that reads sees every write `chain` received before it.
+- Answers may arrive in any order.
+
+The tables below list the calls; the output is the answer's result.
 
 ### Headers
 
@@ -169,8 +177,9 @@ Direct calls. In v0.1 the only caller is `block-sync`. Calls that write are exec
 | `store_headers`    | headers for which `validate_headers` returned `ok`  | stored with height and chain work; `not_connected` if the first header's parent is not stored                                                   |
 | `header`           | block hash                                          | stored header entry `{header, height, chain_work, has_block}`, or not found; `has_block` is true when the block is in `blocks`                  |
 | `header_at`        | height                                              | header entry of the active chain at that height, or not found                                                                                   |
+| `locator`          | —                                                   | the [block locator](../../flows/mode-standard.md#block-locator) of the active chain, built against one tip                                      |
 
-`validate_headers` writes nothing.
+`validate_headers` writes nothing. `store_headers` writes nothing for headers that are already stored.
 
 ### Blocks
 

@@ -12,21 +12,29 @@ flowchart LR
         bs["block-sync"]
         chain["chain"]
         q[["block-sync queue"]]
+        cq[["chain queue"]]
+        aq[["block-sync answer queue"]]
     end
     peers <-- " TCP " --> net
-    net -- " routed peer messages " --> q
+    net -- " routed peer messages,<br/>peer events " --> q
     q --> bs
     bs == " peers CRUD, send " ==> net
-    bs == " headers / blocks / tip CRUD,<br/>validation " ==> chain
+    bs -- " headers / blocks / tip CRUD,<br/>validation " --> cq
+    cq --> chain
+    chain -- " answers " --> aq
+    aq --> bs
 ```
 
-| Interaction                                                | Kind            | Direction              |
-|------------------------------------------------------------|-----------------|------------------------|
-| Peer messages owned by `block-sync`                        | in-memory queue | `net` → `block-sync`   |
-| Peers CRUD, sending a message to a peer                    | direct call     | `block-sync` → `net`   |
-| Header and block validation, CRUD for tip, headers, blocks | direct call     | `block-sync` → `chain` |
+| Interaction                                                          | Kind            | Direction              |
+|----------------------------------------------------------------------|-----------------|------------------------|
+| Peer messages owned by `block-sync`, peers connected/disconnected    | in-memory queue | `net` → `block-sync`   |
+| Peers CRUD, sending a message to a peer                              | direct call     | `block-sync` → `net`   |
+| Requests: header and block validation, CRUD for tip, headers, blocks | in-memory queue | `block-sync` → `chain` |
+| Answers to the requests                                              | in-memory queue | `chain` → `block-sync` |
 
-`chain` calls no other module. `net` calls no other module; it only pushes routed messages into queues.
+`chain` calls no other module; it only pushes each answer into the queue its request names
+([interface](../modules/chain/README.md#interface)). `net` calls no other module; it only pushes routed messages and peer
+events into queues.
 
 Queues are bounded. Messages are never dropped from a queue: a full queue is a node failure, and the node stops.
 

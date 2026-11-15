@@ -7,4 +7,5 @@
 | [mode-standard.md](mode-standard.md) | Processing headers, block locator, appending a new header            |
 | [mode-reorg.md](mode-reorg.md)       | Next header, next header (+t), current header or older               |
 
-In diagrams, `->>` with `-->>` is a direct call and its result, `-)` is a push to a queue or a P2P message.
+In diagrams, `->>` with `-->>` is a direct call and its result, or a request to `chain` and its answer; `-)` is a push
+to a queue or a P2P message.
