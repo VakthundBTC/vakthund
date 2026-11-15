@@ -1,10 +1,12 @@
 //! `block-sync` (`docs/modules/block-sync/README.md`).
 
 mod block_sync;
-mod chain_client;
 mod config;
 mod error;
+mod handlers;
+mod messages;
 mod queue;
+mod requests;
 mod state;
 mod timers;
 

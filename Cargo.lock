@@ -239,7 +239,9 @@ name = "block-sync"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
+ "bitcoin-p2p-messages",
  "interfaces",
+ "rand 0.10.3",
  "serde",
  "thiserror",
  "tokio",

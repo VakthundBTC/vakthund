@@ -1,3 +1,4 @@
+use bitcoin_p2p_messages::message::CommandStringError;
 use interfaces::chain::ChainError;
 
 /// Every error stops the node.
@@ -5,6 +6,8 @@ use interfaces::chain::ChainError;
 pub enum BlockSyncError {
     #[error("chain: {0}")]
     Chain(#[from] ChainError),
+    #[error("command: {0}")]
+    Command(#[from] CommandStringError),
     #[error("the chain queue is full")]
     ChainQueueFull,
     /// The answer does not match its request's call.

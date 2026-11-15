@@ -37,10 +37,10 @@ The module reads two queues: its queue, which `net` fills with routed messages a
 into which `chain` pushes the answers to its requests. It also has timers for [request timeouts](#request-timeout). It
 calls `net` directly and sends requests to `chain` ([interface](../chain/README.md#interface)):
 
-| Module  | Calls                                                                                                               |
-|---------|---------------------------------------------------------------------------------------------------------------------|
-| `net`   | `get_peers`, `get_peer`, `send`, `disconnect`                                                                       |
-| `chain` | `validate_headers`, `store_headers`, `header`, `header_at`, `tip`, `store_block`, `connect_block`, `disconnect_tip` |
+| Module  | Calls                                                                                                                          |
+|---------|--------------------------------------------------------------------------------------------------------------------------------|
+| `net`   | `get_peers`, `get_peer`, `send`, `disconnect`                                                                                  |
+| `chain` | `validate_headers`, `store_headers`, `header`, `header_at`, `locator`, `tip`, `store_block`, `connect_block`, `disconnect_tip` |
 
 To obtain information from peers about the blockchain state, the module sends the following messages:
 

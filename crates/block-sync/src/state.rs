@@ -11,8 +11,7 @@ use std::collections::HashSet;
 use bitcoin::block::Header;
 use bitcoin::{BlockHash, BlockHeight};
 use interfaces::net::PeerId;
-
-use crate::timers::TimerKey;
+use tokio::time::Instant;
 
 /// The mode (`docs/architecture/overview.md`, "Modes"), with the data only that mode uses.
 pub enum Status {
@@ -28,6 +27,8 @@ pub struct Ibd {
     /// The peers that have failed as the sync peer, in the header or the block download, since
     /// every peer was last tried.
     pub tried: HashSet<PeerId>,
+    /// Every connected peer has failed in turn: the next sync peer is chosen at this instant.
+    pub restart_at: Option<Instant>,
     pub phase: IbdPhase,
 }
 
@@ -77,19 +78,11 @@ pub struct Reorg {
     pub connected_index: usize,
 }
 
+/// The flows' data for a connected peer; its requests are in `Requests`.
 #[derive(Default)]
 pub struct PeerData {
-    /// At most one `getheaders` per peer, so a `headers` message answers at most one request.
-    pub headers: Option<HeadersRequest>,
     /// At most one per peer (`docs/modules/block-sync/README.md`, "Candidates").
     pub candidate: Option<Candidate>,
-}
-
-pub struct HeadersRequest {
-    /// Cancelled when the request ends.
-    pub timer: TimerKey,
-    pub locator: Vec<BlockHash>,
-    pub purpose: HeadersPurpose,
 }
 
 pub enum HeadersPurpose {
@@ -113,15 +106,3 @@ pub enum Candidate {
         missing: HashSet<BlockHash>,
     },
 }
-
-/// A request for a block sent to a peer, and where it stands. A failed request asks no other
-/// peer (`docs/modules/block-sync/README.md`, "Failed block request").
-pub enum BlockFetch {
-    /// `timer` is cancelled when the request ends, including when the block arrives.
-    Requested { peer: PeerId, timer: TimerKey },
-    /// The block arrived from `peer` and `store_block` is in flight.
-    Storing { peer: PeerId },
-}
-
-/// What block-sync does when `chain` answers a request. Each flow adds its own variants.
-pub enum Pending {}

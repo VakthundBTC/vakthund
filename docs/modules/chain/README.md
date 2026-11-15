@@ -177,6 +177,7 @@ The tables below list the calls; the output is the answer's result.
 | `store_headers`    | headers for which `validate_headers` returned `ok`  | stored with height and chain work; `not_connected` if the first header's parent is not stored                                                   |
 | `header`           | block hash                                          | stored header entry `{header, height, chain_work, has_block}`, or not found; `has_block` is true when the block is in `blocks`                  |
 | `header_at`        | height                                              | header entry of the active chain at that height, or not found                                                                                   |
+| `locator`          | —                                                   | the [block locator](../../flows/mode-standard.md#block-locator) of the active chain, built against one tip                                      |
 
 `validate_headers` writes nothing. `store_headers` writes nothing for headers that are already stored.
 

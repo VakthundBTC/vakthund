@@ -101,6 +101,9 @@ pub enum ChainCall {
     Header(BlockHash),
     /// The header at this height on the active chain.
     HeaderAt(BlockHeight),
+    /// The block locator of the active chain (`docs/flows/mode-standard.md`, "Block locator"),
+    /// built against one tip: newest first, ending with genesis.
+    Locator,
     /// Runs the mutation and basic checks. Storing an already stored block succeeds.
     ///
     /// Errors: `UnknownHeader`, `Mutated`, `Consensus`.
@@ -132,6 +135,7 @@ pub enum ChainResult {
     StoreHeaders(Result<(), ChainError>),
     Header(Result<Option<HeaderEntry>, ChainError>),
     HeaderAt(Result<Option<HeaderEntry>, ChainError>),
+    Locator(Result<Vec<BlockHash>, ChainError>),
     StoreBlock(Result<(), ChainError>),
     /// The new tip.
     ConnectBlock(Result<Tip, ChainError>),
