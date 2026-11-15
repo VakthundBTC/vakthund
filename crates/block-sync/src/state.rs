@@ -1,14 +1,10 @@
 //! block-sync's in-memory state (`docs/modules/block-sync/README.md`, "State"). Only block-sync's
 //! task reads and writes it, so nothing is behind a lock.
 
-#![expect(
-    dead_code,
-    reason = "read and written by the IBD and standard-mode flows, which come next"
-)]
-
 use std::collections::HashSet;
 
 use bitcoin::block::Header;
+use bitcoin::pow::Work;
 use bitcoin::{BlockHash, BlockHeight};
 use interfaces::net::PeerId;
 use tokio::time::Instant;
@@ -59,10 +55,20 @@ pub struct BlockDownload {
     pub stored: HashSet<BlockHash>,
 }
 
+impl BlockDownload {
+    /// Fetched or being fetched, and not yet sent to `connect_block`.
+    pub fn pending(&self) -> &[BlockHash] {
+        self.hashes
+            .get(self.connect_sent_index..self.requested_index)
+            .unwrap_or_default()
+    }
+}
+
 /// `docs/flows/mode-reorg.md`: every block of A+1..B is stored. Disconnecting is done when the
 /// tip's height is `lca_height`, the reorg when `connected_index == chain.len()`.
 pub struct Reorg {
     /// A.
+    #[expect(dead_code, reason = "for logging, which block-sync does not have yet")]
     pub lca: BlockHash,
     pub lca_height: BlockHeight,
     /// The tip's height once every `disconnect_tip` sent so far is applied; requests are sent
@@ -99,10 +105,34 @@ pub enum Candidate {
     /// The `getheaders` loop of the LCA search runs, or `chain` is asked about its headers.
     Resolving,
     /// Every block of LCA+1..H is stored once `missing` is empty.
-    Downloading {
-        lca: BlockHash,
-        lca_height: BlockHeight,
-        chain: Vec<BlockHash>,
-        missing: HashSet<BlockHash>,
-    },
+    Downloading(Download),
+}
+
+pub struct Download {
+    pub lca: BlockHash,
+    pub lca_height: BlockHeight,
+    /// LCA+1..H in height order.
+    pub chain: Vec<BlockHash>,
+    /// The index of the next block to fetch: `chain[..requested_index]` are fetched or being
+    /// fetched, for this candidate or another.
+    pub requested_index: usize,
+    /// Not stored yet.
+    pub missing: HashSet<BlockHash>,
+}
+
+/// Validated headers of a candidate whose LCA is being found (`docs/flows/mode-standard.md`,
+/// "Processing headers"): first back from their parent to the active chain, then, if the parent
+/// is on it, forward past the headers that are on it too.
+pub struct Resolution {
+    /// In chain order; `headers[0]` is at `first_height`.
+    pub headers: Vec<Header>,
+    pub first_height: BlockHeight,
+    pub last_chain_work: Work,
+    /// The stored header checked against the active chain, at `height`.
+    pub cursor: BlockHash,
+    pub height: BlockHeight,
+    /// The stored headers walked past, newest first: not on the active chain.
+    pub path: Vec<BlockHash>,
+    /// The number of headers found on the active chain, from the start of `headers`.
+    pub skip: usize,
 }

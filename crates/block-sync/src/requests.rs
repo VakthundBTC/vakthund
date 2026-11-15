@@ -15,7 +15,7 @@ use interfaces::queue::Queue;
 use tokio::time::Instant;
 
 use crate::error::BlockSyncError;
-use crate::state::HeadersPurpose;
+use crate::state::{HeadersPurpose, Resolution};
 use crate::timers::Timers;
 
 /// Also the [`ChainRequestId`] of a request to `chain`.
@@ -23,11 +23,11 @@ use crate::timers::Timers;
 pub struct RequestId(u64);
 
 /// A request and its handlers; a new variant needs an answer and a deadline handler in
-/// `BlockSync`.
+/// `BlockSync`. All but `Headers` and `Block` go to `chain`.
 pub enum Request {
-    /// To `chain`: the tip, before the event loop starts.
+    /// The tip, before the event loop starts.
     StartUpTip,
-    /// To `chain`: the locator for the peer's next `getheaders`.
+    /// The locator for the peer's next `getheaders`.
     Locator {
         peer: PeerId,
         purpose: HeadersPurpose,
@@ -39,11 +39,61 @@ pub enum Request {
         purpose: HeadersPurpose,
     },
     /// To the peer: `getdata` for one block.
-    #[expect(
-        dead_code,
-        reason = "sent by the IBD and standard-mode flows, which come next"
-    )]
-    Block { peer: PeerId, hash: BlockHash },
+    Block {
+        peer: PeerId,
+        hash: BlockHash,
+    },
+    /// `validate_headers` of the whole IBD header chain from the sync peer.
+    IbdValidateHeaders {
+        peer: PeerId,
+        headers: Vec<Header>,
+    },
+    /// `store_headers` of the validated IBD header chain.
+    IbdStoreHeaders {
+        hashes: Vec<BlockHash>,
+    },
+    /// `validate_headers` of a candidate's headers; `searched`: they come from the LCA search.
+    ValidateCandidate {
+        peer: PeerId,
+        headers: Vec<Header>,
+        searched: bool,
+    },
+    /// `header_at` for the walk back to the active chain.
+    LcaActive {
+        peer: PeerId,
+        resolution: Resolution,
+    },
+    /// `header` of the cursor, for its parent.
+    LcaParent {
+        peer: PeerId,
+        resolution: Resolution,
+    },
+    /// `header_at` for the walk forward past headers already on the active chain.
+    SkipActive {
+        peer: PeerId,
+        resolution: Resolution,
+    },
+    /// `header` of the last block hash an `inv` announced.
+    InvHeader {
+        peer: PeerId,
+        hash: BlockHash,
+    },
+    /// `store_headers` of a candidate's new headers.
+    StoreCandidateHeaders,
+    /// `header` of a block to fetch: stored blocks are not requested.
+    HasBlock {
+        peer: PeerId,
+        hash: BlockHash,
+    },
+    /// `store_block` of a block received from the peer.
+    StoreBlock {
+        peer: PeerId,
+        hash: BlockHash,
+    },
+    ConnectBlock {
+        hash: BlockHash,
+    },
+    DisconnectTip,
 }
 
 /// What answered a request.
@@ -61,10 +111,12 @@ pub struct Answered {
     pub current: bool,
 }
 
-/// One per peer for the next `getheaders`, one per block.
+/// One per peer for the next `getheaders`, one per peer for resolving its candidate, one per
+/// block from its fetch to its storing.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum IndexKey {
     Headers(PeerId),
+    Candidate(PeerId),
     Block(BlockHash),
 }
 
@@ -88,28 +140,57 @@ pub struct Requests {
 
 impl Request {
     fn to_chain(&self) -> bool {
-        match self {
-            Request::StartUpTip | Request::Locator { .. } => true,
-            Request::Headers { .. } | Request::Block { .. } => false,
-        }
+        !matches!(self, Request::Headers { .. } | Request::Block { .. })
     }
 
     fn peer(&self) -> Option<PeerId> {
         match self {
-            Request::StartUpTip => None,
             Request::Locator { peer, .. }
             | Request::Headers { peer, .. }
-            | Request::Block { peer, .. } => Some(*peer),
+            | Request::Block { peer, .. }
+            | Request::IbdValidateHeaders { peer, .. }
+            | Request::ValidateCandidate { peer, .. }
+            | Request::LcaActive { peer, .. }
+            | Request::LcaParent { peer, .. }
+            | Request::SkipActive { peer, .. }
+            | Request::InvHeader { peer, .. }
+            | Request::HasBlock { peer, .. }
+            | Request::StoreBlock { peer, .. } => Some(*peer),
+            Request::StartUpTip
+            | Request::IbdStoreHeaders { .. }
+            | Request::StoreCandidateHeaders
+            | Request::ConnectBlock { .. }
+            | Request::DisconnectTip => None,
         }
     }
 
     fn index_key(&self) -> Option<IndexKey> {
         match self {
-            Request::StartUpTip => None,
             Request::Locator { peer, .. } | Request::Headers { peer, .. } => {
                 Some(IndexKey::Headers(*peer))
             }
-            Request::Block { hash, .. } => Some(IndexKey::Block(*hash)),
+            Request::ValidateCandidate { peer, .. }
+            | Request::LcaActive { peer, .. }
+            | Request::LcaParent { peer, .. }
+            | Request::SkipActive { peer, .. }
+            | Request::InvHeader { peer, .. } => Some(IndexKey::Candidate(*peer)),
+            Request::Block { hash, .. }
+            | Request::HasBlock { hash, .. }
+            | Request::StoreBlock { hash, .. } => Some(IndexKey::Block(*hash)),
+            Request::StartUpTip
+            | Request::IbdValidateHeaders { .. }
+            | Request::IbdStoreHeaders { .. }
+            | Request::StoreCandidateHeaders
+            | Request::ConnectBlock { .. }
+            | Request::DisconnectTip => None,
+        }
+    }
+
+    /// The block a request is fetching, or storing.
+    fn block(&self) -> Option<BlockHash> {
+        match self.index_key() {
+            Some(IndexKey::Block(hash)) => Some(hash),
+            _ => None,
         }
     }
 }
@@ -137,10 +218,6 @@ impl Requests {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "used by the IBD and standard-mode flows, which come next"
-    )]
     pub fn has_room(&self, requests: usize) -> bool {
         self.chain_in_flight + requests <= Self::MAX_CHAIN_IN_FLIGHT
     }
@@ -216,28 +293,39 @@ impl Requests {
         }
     }
 
-    /// Ends the peer's requests: its requests to peers are removed and returned; its requests to
-    /// `chain` stay until answered, no longer current.
-    pub fn end_peer(&mut self, peer: PeerId) -> Vec<Request> {
+    /// Whether the block is being fetched or stored.
+    pub fn is_block_wanted(&self, hash: &BlockHash) -> bool {
+        self.request_index.contains_key(&IndexKey::Block(*hash))
+    }
+
+    /// Ends the peer's requests: its requests to peers are removed, its requests to `chain` stay
+    /// until answered, no longer current. Returns the blocks no longer being fetched.
+    pub fn end_peer(&mut self, peer: PeerId) -> Vec<BlockHash> {
         let ids: Vec<RequestId> = self
             .entries
             .iter()
             .filter(|(_, entry)| entry.request.peer() == Some(peer))
             .map(|(id, _)| *id)
             .collect();
-        let mut ended = Vec::new();
+        let mut blocks = Vec::new();
         for id in ids {
-            if self
-                .entries
-                .get(&id)
-                .is_some_and(|entry| entry.request.to_chain())
+            let Some(entry) = self.entries.get(&id) else {
+                continue;
+            };
+            // A block stored for a gone peer is still stored.
+            if !matches!(entry.request, Request::StoreBlock { .. })
+                && let Some(hash) = entry.request.block()
+                && self.is_current(id)
             {
+                blocks.push(hash);
+            }
+            if entry.request.to_chain() {
                 self.unindex(id);
-            } else if let Some(request) = self.remove(id) {
-                ended.push(request);
+            } else {
+                self.remove(id);
             }
         }
-        ended
+        blocks
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {

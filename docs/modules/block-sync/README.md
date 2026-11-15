@@ -69,9 +69,9 @@ A newer announcement from the same peer replaces its candidate.
 
 Several candidates may download at the same time, usually the same chain announced by several peers; a block already
 requested for one candidate is not requested again for another. The first candidate whose blocks are all stored is
-connected: in height order for an appended chain, through reorg mode for an alternative chain. Then every other
-candidate is dropped. Headers and blocks stored for them stay; a peer whose chain still has more work announces it
-again with its next block, and the stored blocks are not downloaded again (`has_block`).
+connected through reorg mode, with k = 0 for an appended chain. Then every other candidate is dropped. Headers and
+blocks stored for them stay; a peer whose chain still has more work announces it again with its next block, and the
+stored blocks are not downloaded again (`has_block`).
 
 --- 
 

@@ -10,7 +10,10 @@ use std::time::Duration;
 use bitcoin::block::Header;
 use bitcoin::pow::Work;
 use bitcoin::{Block, BlockHash, BlockHeight, Network};
-use interfaces::chain::{ChainCall, ChainRequest, ChainResponse, ChainResult, Tip};
+use interfaces::chain::{
+    ChainCall, ChainError, ChainRequest, ChainResponse, ChainResult, HeaderEntry, Tip,
+    ValidatedHeaders,
+};
 use interfaces::net::{Net, PeerId};
 use interfaces::queue::{NetEvent, Queue, RoutedMessage};
 use tokio::sync::mpsc;
@@ -21,7 +24,7 @@ use crate::error::BlockSyncError;
 use crate::messages::{self, PeerMessage};
 use crate::queue::{self, QueueReceiver};
 use crate::requests::{Answer, Answered, Request, Requests};
-use crate::state::{HeadersPurpose, Ibd, IbdPhase, PeerData, Status};
+use crate::state::{HeadersPurpose, Ibd, IbdPhase, PeerData, Resolution, Status};
 
 pub struct BlockSync<N> {
     pub(crate) net: Arc<N>,
@@ -31,17 +34,9 @@ pub struct BlockSync<N> {
     answers: mpsc::Receiver<ChainResponse>,
     pub(crate) timeout: Duration,
     /// IBD lasts while the tip has less chain work.
-    #[expect(
-        dead_code,
-        reason = "read by the IBD flow when IBD ends, which comes next"
-    )]
     pub(crate) minimum_chain_work: Work,
     /// The tip as `chain`'s answers have left it. Only block-sync changes the tip, so this is
     /// exact once its tip-changing requests are answered.
-    #[expect(
-        dead_code,
-        reason = "read by the IBD and standard-mode flows, which come next"
-    )]
     pub(crate) tip: Tip,
     pub(crate) status: Status,
     /// The connected peers.
@@ -68,6 +63,18 @@ enum Handler {
         peer: PeerId,
         headers: Vec<Header>,
     },
+    IbdHeadersValid {
+        headers: Vec<Header>,
+    },
+    /// `headers[..valid]` are valid.
+    IbdHeadersInvalid {
+        peer: PeerId,
+        headers: Vec<Header>,
+        valid: usize,
+    },
+    IbdHeadersStored {
+        hashes: Vec<BlockHash>,
+    },
     SearchHeaders {
         peer: PeerId,
         target: BlockHash,
@@ -82,11 +89,59 @@ enum Handler {
         peer: PeerId,
         hashes: Vec<BlockHash>,
     },
+    /// The last hash an `inv` announced has no stored header.
+    InvUnknown {
+        peer: PeerId,
+        hash: BlockHash,
+    },
+    CandidateValid {
+        peer: PeerId,
+        headers: Vec<Header>,
+        validated: ValidatedHeaders,
+    },
+    CandidateNotConnected {
+        peer: PeerId,
+        headers: Vec<Header>,
+        searched: bool,
+    },
+    CandidateRejected {
+        peer: PeerId,
+    },
+    LcaActive {
+        peer: PeerId,
+        resolution: Resolution,
+        active: Option<BlockHash>,
+    },
+    LcaParent {
+        peer: PeerId,
+        resolution: Resolution,
+        parent: Option<HeaderEntry>,
+    },
+    SkipActive {
+        peer: PeerId,
+        resolution: Resolution,
+        active: Option<BlockHash>,
+    },
+    /// The block is not stored: request it.
+    BlockMissing {
+        peer: PeerId,
+        hash: BlockHash,
+    },
     /// A requested block, or in standard mode a late or unsolicited one.
     Block {
         peer: PeerId,
         block: Block,
         requested: bool,
+    },
+    BlockStored {
+        hash: BlockHash,
+    },
+    BlockConnected {
+        hash: BlockHash,
+        tip: Tip,
+    },
+    TipDisconnected {
+        tip: Tip,
     },
     HeadersRequestFailed {
         peer: PeerId,
@@ -94,6 +149,7 @@ enum Handler {
     },
     BlockRequestFailed {
         peer: PeerId,
+        hash: BlockHash,
     },
     IbdRestart,
 }
@@ -142,6 +198,7 @@ impl<N: Net> BlockSync<N> {
             for handler in self.decide(event)? {
                 self.handle(handler).await?;
             }
+            self.advance()?;
         }
     }
 
@@ -178,7 +235,7 @@ impl<N: Net> BlockSync<N> {
     }
 
     /// Matches the message to a request in flight (`docs/modules/block-sync/README.md`, "Request
-    /// timeout"). In IBD and reorg mode the messages that answer no request are dropped.
+    /// timeout"). In IBD the messages that answer no request are dropped, in reorg mode all.
     fn decide_message(&mut self, message: RoutedMessage) -> Result<Vec<Handler>, BlockSyncError> {
         let peer = message.peer;
         // `net` reports a peer connected before it routes the peer's messages.
@@ -226,6 +283,10 @@ impl<N: Net> BlockSync<N> {
                 }
             }
         }
+        // `docs/flows/mode-reorg.md`: the requests it answers end, the messages are discarded.
+        if matches!(self.status, Status::Reorg(_)) {
+            handlers.clear();
+        }
         Ok(handlers)
     }
 
@@ -238,8 +299,15 @@ impl<N: Net> BlockSync<N> {
                 locator,
                 purpose,
             } => self.send_getheaders(peer, locator, purpose).await,
-            Handler::IbdHeaders { peer, headers } => {
-                self.on_ibd_headers(peer, headers);
+            Handler::IbdHeaders { peer, headers } => self.on_ibd_headers(peer, headers).await,
+            Handler::IbdHeadersValid { headers } => self.on_ibd_headers_valid(headers),
+            Handler::IbdHeadersInvalid {
+                peer,
+                headers,
+                valid,
+            } => self.on_ibd_headers_invalid(peer, headers, valid).await,
+            Handler::IbdHeadersStored { hashes } => {
+                self.on_ibd_headers_stored(hashes);
                 Ok(())
             }
             Handler::SearchHeaders {
@@ -248,30 +316,73 @@ impl<N: Net> BlockSync<N> {
                 collected,
                 headers,
             } => {
-                self.on_search_headers(peer, target, collected, headers);
+                self.on_search_headers(peer, target, collected, headers)
+                    .await
+            }
+            Handler::AnnouncedHeaders { peer, headers } => self.on_announced_headers(peer, headers),
+            Handler::Inv { peer, hashes } => self.on_inv(peer, hashes),
+            Handler::InvUnknown { peer, hash } => self.on_inv_unknown(peer, hash),
+            Handler::CandidateValid {
+                peer,
+                headers,
+                validated,
+            } => self.on_candidate_valid(peer, headers, validated),
+            Handler::CandidateNotConnected {
+                peer,
+                headers,
+                searched,
+            } => self.on_candidate_not_connected(peer, headers, searched),
+            Handler::CandidateRejected { peer } => {
+                self.drop_candidate(peer);
                 Ok(())
             }
-            Handler::AnnouncedHeaders { peer, headers } => {
-                self.on_announced_headers(peer, headers);
-                Ok(())
-            }
-            Handler::Inv { peer, hashes } => {
-                self.on_inv(peer, hashes);
-                Ok(())
-            }
+            Handler::LcaActive {
+                peer,
+                resolution,
+                active,
+            } => self.on_lca_active(peer, resolution, active),
+            Handler::LcaParent {
+                peer,
+                resolution,
+                parent,
+            } => self.on_lca_parent(peer, resolution, parent),
+            Handler::SkipActive {
+                peer,
+                resolution,
+                active,
+            } => self.on_skip_active(peer, resolution, active),
+            Handler::BlockMissing { peer, hash } => self.send_getdata(peer, hash).await,
             Handler::Block {
                 peer,
                 block,
                 requested,
-            } => {
-                self.on_block(peer, block, requested);
+            } => self.on_block(peer, block, requested),
+            Handler::BlockStored { hash } => {
+                self.on_block_stored(hash);
+                Ok(())
+            }
+            Handler::BlockConnected { hash, tip } => self.on_block_connected(hash, tip).await,
+            Handler::TipDisconnected { tip } => {
+                self.tip = tip;
                 Ok(())
             }
             Handler::HeadersRequestFailed { peer, purpose } => {
                 self.on_headers_request_failed(peer, purpose).await
             }
-            Handler::BlockRequestFailed { peer } => self.on_block_request_failed(peer).await,
+            Handler::BlockRequestFailed { peer, hash } => {
+                self.on_block_request_failed(peer, hash).await
+            }
             Handler::IbdRestart => self.on_ibd_restart().await,
+        }
+    }
+
+    /// After every event: sends the requests the mode can send now, within the room for
+    /// requests to `chain`.
+    fn advance(&mut self) -> Result<(), BlockSyncError> {
+        match self.status {
+            Status::Ibd(_) => self.advance_ibd(),
+            Status::Standard => self.advance_candidates(),
+            Status::Reorg(_) => self.advance_reorg(),
         }
     }
 
@@ -283,8 +394,8 @@ impl<N: Net> BlockSync<N> {
     }
 }
 
-/// `None`: the answer needs nothing more; a locator that is not current was replaced, or its
-/// peer has gone.
+/// `None`: the answer needs nothing more, or its request is no longer current (replaced, or
+/// its peer has gone). An error of a write is a node failure whether current or not.
 fn answer_handler(answered: Answered, answer: Answer) -> Result<Option<Handler>, BlockSyncError> {
     let Answered { request, current } = answered;
     let handler = match (request, answer) {
@@ -322,8 +433,117 @@ fn answer_handler(answered: Answered, answer: Answer) -> Result<Option<Handler>,
             block,
             requested: true,
         }),
-        (Request::Block { peer, .. }, Answer::NotFound) => {
-            Some(Handler::BlockRequestFailed { peer })
+        (Request::Block { peer, hash }, Answer::NotFound) => {
+            Some(Handler::BlockRequestFailed { peer, hash })
+        }
+        (
+            Request::IbdValidateHeaders { peer, headers },
+            Answer::Chain(ChainResult::ValidateHeaders(result)),
+        ) => match result {
+            Ok(_) => Some(Handler::IbdHeadersValid { headers }),
+            Err(ChainError::InvalidHeader { index, .. }) => Some(Handler::IbdHeadersInvalid {
+                peer,
+                headers,
+                valid: index,
+            }),
+            Err(ChainError::NotConnected) => Some(Handler::IbdHeadersInvalid {
+                peer,
+                headers,
+                valid: 0,
+            }),
+            Err(error) => return Err(error.into()),
+        },
+        (Request::IbdStoreHeaders { hashes }, Answer::Chain(ChainResult::StoreHeaders(result))) => {
+            result?;
+            Some(Handler::IbdHeadersStored { hashes })
+        }
+        (
+            Request::ValidateCandidate {
+                peer,
+                headers,
+                searched,
+            },
+            Answer::Chain(ChainResult::ValidateHeaders(result)),
+        ) => match result {
+            Ok(validated) => current.then_some(Handler::CandidateValid {
+                peer,
+                headers,
+                validated,
+            }),
+            Err(ChainError::NotConnected) => current.then_some(Handler::CandidateNotConnected {
+                peer,
+                headers,
+                searched,
+            }),
+            // The docs do not cover invalid announced headers: the candidate is dropped.
+            Err(ChainError::InvalidHeader { .. }) => {
+                current.then_some(Handler::CandidateRejected { peer })
+            }
+            Err(error) => return Err(error.into()),
+        },
+        (Request::LcaActive { peer, resolution }, Answer::Chain(ChainResult::HeaderAt(entry))) => {
+            let active = entry?.map(|entry| entry.header.block_hash());
+            current.then_some(Handler::LcaActive {
+                peer,
+                resolution,
+                active,
+            })
+        }
+        (Request::LcaParent { peer, resolution }, Answer::Chain(ChainResult::Header(entry))) => {
+            let parent = entry?;
+            current.then_some(Handler::LcaParent {
+                peer,
+                resolution,
+                parent,
+            })
+        }
+        (Request::SkipActive { peer, resolution }, Answer::Chain(ChainResult::HeaderAt(entry))) => {
+            let active = entry?.map(|entry| entry.header.block_hash());
+            current.then_some(Handler::SkipActive {
+                peer,
+                resolution,
+                active,
+            })
+        }
+        (Request::InvHeader { peer, hash }, Answer::Chain(ChainResult::Header(entry))) => {
+            let known = entry?.is_some();
+            (current && !known).then_some(Handler::InvUnknown { peer, hash })
+        }
+        (Request::StoreCandidateHeaders, Answer::Chain(ChainResult::StoreHeaders(result))) => {
+            result?;
+            None
+        }
+        (Request::HasBlock { peer, hash }, Answer::Chain(ChainResult::Header(entry))) => {
+            match entry? {
+                Some(entry) if entry.has_block => Some(Handler::BlockStored { hash }),
+                _ => current.then_some(Handler::BlockMissing { peer, hash }),
+            }
+        }
+        (Request::StoreBlock { peer, hash }, Answer::Chain(ChainResult::StoreBlock(result))) => {
+            match result {
+                Ok(()) => Some(Handler::BlockStored { hash }),
+                Err(ChainError::Mutated { .. }) => {
+                    current.then_some(Handler::BlockRequestFailed { peer, hash })
+                }
+                Err(ChainError::Consensus { reason }) => {
+                    return Err(BlockSyncError::Consensus { hash, reason });
+                }
+                // An unsolicited block whose header is not stored is dropped.
+                Err(ChainError::UnknownHeader) => None,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        (Request::ConnectBlock { hash }, Answer::Chain(ChainResult::ConnectBlock(result))) => {
+            match result {
+                Ok(tip) => Some(Handler::BlockConnected { hash, tip }),
+                Err(ChainError::Consensus { reason }) => {
+                    return Err(BlockSyncError::Consensus { hash, reason });
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        (Request::DisconnectTip, Answer::Chain(ChainResult::DisconnectTip(result))) => {
+            Some(Handler::TipDisconnected { tip: result? })
         }
         _ => return Err(BlockSyncError::UnexpectedAnswer),
     };
@@ -336,8 +556,8 @@ fn timeout_handler(request: Request) -> Option<Handler> {
         Request::Headers { peer, purpose, .. } => {
             Some(Handler::HeadersRequestFailed { peer, purpose })
         }
-        Request::Block { peer, .. } => Some(Handler::BlockRequestFailed { peer }),
-        Request::StartUpTip | Request::Locator { .. } => None,
+        Request::Block { peer, hash } => Some(Handler::BlockRequestFailed { peer, hash }),
+        _ => None,
     }
 }
 

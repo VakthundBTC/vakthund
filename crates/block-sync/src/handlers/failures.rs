@@ -1,5 +1,6 @@
 //! What a failed request means for its flow.
 
+use bitcoin::BlockHash;
 use interfaces::net::{Net, PeerId};
 
 use crate::block_sync::BlockSync;
@@ -22,25 +23,20 @@ impl<N: Net> BlockSync<N> {
         }
     }
 
-    /// `docs/modules/block-sync/README.md`, "Failed block request".
+    /// `docs/modules/block-sync/README.md`, "Failed block request": in IBD the sync peer has
+    /// failed; otherwise the peer's candidate is dropped and another candidate that needs the
+    /// block requests it from its own peer.
     pub(crate) async fn on_block_request_failed(
         &mut self,
         peer: PeerId,
+        hash: BlockHash,
     ) -> Result<(), BlockSyncError> {
         match self.status {
             Status::Ibd(_) => self.sync_peer_failed(peer).await,
-            // Other candidates that need the block request it with the standard-mode flow, which
-            // comes next.
             Status::Standard | Status::Reorg(_) => {
                 self.drop_candidate(peer);
-                Ok(())
+                self.refetch(hash)
             }
-        }
-    }
-
-    fn drop_candidate(&mut self, peer: PeerId) {
-        if let Some(data) = self.peers.get_mut(&peer) {
-            data.candidate = None;
         }
     }
 }

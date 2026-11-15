@@ -1,12 +1,11 @@
 //! Peers connecting and disconnecting, and the IBD sync peer they change.
 
-use bitcoin::block::Header;
 use interfaces::net::{Net, PeerId};
 use tokio::time::Instant;
 
 use crate::block_sync::BlockSync;
 use crate::error::BlockSyncError;
-use crate::state::{HeadersPurpose, IbdPhase, PeerData, Status};
+use crate::state::{IbdPhase, PeerData, Status};
 
 impl<N: Net> BlockSync<N> {
     pub(crate) async fn on_peer_connected(&mut self, peer: PeerId) -> Result<(), BlockSyncError> {
@@ -20,10 +19,12 @@ impl<N: Net> BlockSync<N> {
         &mut self,
         peer: PeerId,
     ) -> Result<(), BlockSyncError> {
-        self.requests.end_peer(peer);
-        // Its candidate goes with it. Other candidates that need its blocks request them with the
-        // standard-mode flow, which comes next.
+        let blocks = self.requests.end_peer(peer);
+        // Its candidate goes with it; another candidate that needs its blocks requests them.
         self.peers.remove(&peer);
+        for hash in blocks {
+            self.refetch(hash)?;
+        }
         self.sync_peer_failed(peer).await
     }
 
@@ -37,7 +38,7 @@ impl<N: Net> BlockSync<N> {
 
     /// Nothing unless `peer` is the IBD sync peer. Its requests end and another peer continues:
     /// the header download from the last header received, or IBD from the headers if the blocks
-    /// were downloading (`docs/flows/mode-ibd.md`).
+    /// were downloading (`docs/flows/mode-ibd.md`). Headers being validated and stored are kept.
     pub(crate) async fn sync_peer_failed(&mut self, peer: PeerId) -> Result<(), BlockSyncError> {
         let Status::Ibd(ibd) = &mut self.status else {
             return Ok(());
@@ -58,7 +59,7 @@ impl<N: Net> BlockSync<N> {
 
     /// In IBD without a sync peer: a random connected peer that has not failed. When every
     /// connected peer has, IBD waits `request_timeout_secs` and starts again with the first.
-    async fn choose_sync_peer(&mut self) -> Result<(), BlockSyncError> {
+    pub(crate) async fn choose_sync_peer(&mut self) -> Result<(), BlockSyncError> {
         let Status::Ibd(ibd) = &mut self.status else {
             return Ok(());
         };
@@ -84,16 +85,6 @@ impl<N: Net> BlockSync<N> {
         ibd.sync_peer = Some(peer);
         // A peer that connects during the wait ends it.
         ibd.restart_at = None;
-        let last = match &ibd.phase {
-            IbdPhase::Headers { received } => received.last().map(Header::block_hash),
-            IbdPhase::StoringHeaders | IbdPhase::Blocks(_) => None,
-        };
-        match last {
-            Some(last) => {
-                self.send_getheaders(peer, vec![last], HeadersPurpose::Ibd)
-                    .await
-            }
-            None => self.request_locator(peer, HeadersPurpose::Ibd),
-        }
+        self.continue_ibd_headers().await
     }
 }

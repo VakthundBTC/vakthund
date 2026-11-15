@@ -46,4 +46,21 @@ impl<N: Net> BlockSync<N> {
         self.requests.sent_to_peer(request, sent);
         Ok(())
     }
+
+    /// Only while a flow still needs the block: none does in reorg mode, which sends no
+    /// requests.
+    pub(crate) async fn send_getdata(
+        &mut self,
+        peer: PeerId,
+        hash: BlockHash,
+    ) -> Result<(), BlockSyncError> {
+        if !self.peers.contains_key(&peer) || !self.needs_block(&hash) {
+            return Ok(());
+        }
+        let (command, payload) = messages::getdata(hash)?;
+        let sent = self.net.send(peer, command, payload).await.is_ok();
+        self.requests
+            .sent_to_peer(Request::Block { peer, hash }, sent);
+        Ok(())
+    }
 }

@@ -52,6 +52,12 @@ pub fn getheaders(
     ))
 }
 
+/// `MSG_WITNESS_BLOCK` (BIP144): the block with its witness data.
+pub fn getdata(hash: BlockHash) -> Result<(CommandString, Vec<u8>), BlockSyncError> {
+    let message = InventoryPayload(vec![Inventory::WitnessBlock(hash)]);
+    Ok((CommandString::try_from("getdata")?, encode_to_vec(&message)))
+}
+
 fn decode_payload<T: Decode>(payload: &[u8]) -> Option<T> {
     decode_from_slice(payload).ok()
 }

@@ -1,9 +1,11 @@
 # Mode: Reorg
 
 Reorg mode covers the disconnection of the node's blocks and the connection of the alternative chain's blocks. It
-starts only when every block of the alternative chain is stored, so it sends no requests. During reorg mode all other
-processes are paused, except maintaining the connections with peers; messages in the `block-sync` queue are consumed and
-discarded.
+starts only when every block of the alternative chain is stored, so it sends no requests. Appending blocks to the tip
+([append new header](mode-standard.md#append-new-header)) runs in reorg mode too, with k = 0: no block is disconnected.
+During reorg mode all other processes are paused, except maintaining the connections with peers; messages in the
+`block-sync` queue are consumed and discarded, block announcements included. TBD: an announcement discarded this way is
+not processed; the next one, about 10 minutes later, catches up.
 
 Reorg happens if in the standard mode, we found a valid chain of headers A..B, where A belongs to the node's current
 chain, every header (A+1)..B does not belong to the node's chain and the chain work of B is greater than the chain work
