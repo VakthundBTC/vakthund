@@ -19,13 +19,12 @@ A reorg proceeds as follows, with k = tip − height(A):
 
 1. `block-sync` stores the headers (A+1)..B with `chain.store_headers`.
 2. `block-sync` downloads the blocks (A+1)..B ([block download](../modules/block-sync/README.md#block-download)): blocks
-   that are already stored are not requested; the others are requested from the peer that announced B, and if it does
-   not answer, from random eligible peers ([peer selection](../modules/block-sync/README.md#peer-selection)); each
-   received block is stored with `chain.store_block` (a mutated block is requested from another eligible peer; a
-   consensus rejection stops the node). During the block download, the node continues working in standard mode. If a
-   block is unavailable from every eligible peer, the reorg is
-   abandoned ([unavailable block](../modules/block-sync/README.md#unavailable-block)): the headers and the blocks stored
-   so far stay, nothing else changes.
+   that are already stored are not requested; the others are requested from the peer that announced B
+   ([peer selection](../modules/block-sync/README.md#peer-selection)); each received block is stored with
+   `chain.store_block` (a consensus rejection stops the node). During the block download, the node continues working
+   in standard mode. If a block request fails, including a mutated block, the reorg of this candidate is
+   abandoned ([failed block request](../modules/block-sync/README.md#failed-block-request)): the headers and the blocks
+   stored so far stay, nothing else changes.
 3. When every block of (A+1)..B is stored, `block-sync` enters reorg mode and drops the other candidates, unless
    another candidate was connected first ([candidates](../modules/block-sync/README.md#candidates)).
 4. `block-sync` calls `chain.disconnect_tip` k times. The tip block is then A.
@@ -39,7 +38,7 @@ sequenceDiagram
     participant N as net
     participant BS as block-sync
     participant C as chain
-    participant P as announcing peer, then random peers
+    participant P as announcing peer
     Note over BS: knows alternative chain of headers tip-k ... tip+1, where tip-k is A (the LCA)
     BS ->> C: chain.validate_headers(tip-k+1 ... tip+1)
     C -->> BS: ok
@@ -51,7 +50,7 @@ sequenceDiagram
         N -) P: getdata
         P -) N: block
         N -) BS: queue: {peer, "block", block}
-        Note over BS: if no answer within the request timeout, or notfound —<br/>request the block from a random connected peer,<br/>unavailable from every peer — abandon the reorg
+        Note over BS: if no answer within the request timeout, or notfound —<br/>abandon the reorg of this candidate
         BS ->> C: chain.store_block(block)
         C -->> BS: stored, or rejected {mutated | consensus, reason}
     end

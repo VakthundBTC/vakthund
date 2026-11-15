@@ -146,17 +146,18 @@ if it is at most the chain work of the tip, the headers LCA + 1 ... H are not st
 If the LCA is the current tip, we can just update it sequentially. This is the same procedure as the
 [IBD block download](mode-ibd.md#downloading-blocks) over the stored headers `tip + 1 ... H`
 ([block download](../modules/block-sync/README.md#block-download)): blocks that are already stored are not
-requested. The others are requested from the peer that announced H, and if it does not answer — from random eligible
-peers ([peer selection](../modules/block-sync/README.md#peer-selection)). Then each received
-block is stored with `chain.store_block` and connected with `chain.connect_block` in height order. A block unavailable
-from every eligible peer ends the download ([unavailable block](../modules/block-sync/README.md#unavailable-block)): the
-headers stay stored and the blocks are requested again on the next announcement. A download is also dropped when
-another candidate is connected first ([candidates](../modules/block-sync/README.md#candidates)).
+requested. The others are requested from the peer that announced H
+([peer selection](../modules/block-sync/README.md#peer-selection)). Then each received block is stored with
+`chain.store_block` and connected with `chain.connect_block` in height order. A failed block request drops the download
+([failed block request](../modules/block-sync/README.md#failed-block-request)): the headers stay stored, another
+candidate that needs the block requests it from its own peer, and otherwise the blocks are requested again on the next
+announcement. A download is also dropped when another candidate is connected first
+([candidates](../modules/block-sync/README.md#candidates)).
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant P1 as announcing peer, then random peers
+    participant P1 as announcing peer
     participant N as net
     participant BS as block-sync
     participant C as chain
@@ -170,7 +171,7 @@ sequenceDiagram
             N -) P1: getdata
             P1 -) N: block[H]
             N -) BS: queue: {announcing peer, "block", block[H]}
-            Note over BS: if no answer within the request timeout, or notfound —<br/>request the missing blocks from a random connected peer,<br/>unavailable from every peer — stop, wait for the next announcement
+            Note over BS: if no answer within the request timeout, or notfound —<br/>drop the download, wait for the next announcement
         end
 
         BS ->> C: chain.store_block(block[H])

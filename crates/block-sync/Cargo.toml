@@ -6,4 +6,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bitcoin = { workspace = true }
+interfaces = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

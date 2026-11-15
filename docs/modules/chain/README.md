@@ -178,7 +178,7 @@ The tables below list the calls; the output is the answer's result.
 | `header`           | block hash                                          | stored header entry `{header, height, chain_work, has_block}`, or not found; `has_block` is true when the block is in `blocks`                  |
 | `header_at`        | height                                              | header entry of the active chain at that height, or not found                                                                                   |
 
-`validate_headers` writes nothing.
+`validate_headers` writes nothing. `store_headers` writes nothing for headers that are already stored.
 
 ### Blocks
 
