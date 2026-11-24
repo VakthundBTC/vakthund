@@ -13,7 +13,7 @@ use bitcoin_p2p_messages::message::{CommandString, Ping, Pong};
 use bitcoin_p2p_messages::message_network::{UserAgent, VersionMessage};
 use bitcoin_p2p_messages::{Magic, ProtocolVersion, ServiceFlags};
 use interfaces::net::{PeerFeatures, PeerId};
-use interfaces::queue::{MessageQueue, RoutedMessage};
+use interfaces::queue::{NetEvent, Queue, RoutedMessage};
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -82,7 +82,7 @@ impl ConnectionHandle {
 }
 
 /// `number` must differ from the numbers of the peer's earlier connection tasks.
-pub fn spawn<Q: MessageQueue + 'static>(
+pub fn spawn<Q: Queue<NetEvent> + 'static>(
     peer: PeerId,
     number: u64,
     address: SocketAddr,
@@ -128,7 +128,7 @@ struct Connection<Q> {
     reports: mpsc::UnboundedSender<Report>,
 }
 
-impl<Q: MessageQueue> Connection<Q> {
+impl<Q: Queue<NetEvent>> Connection<Q> {
     async fn run(
         &self,
         address: SocketAddr,
@@ -233,7 +233,9 @@ impl<Q: MessageQueue> Connection<Q> {
                     command: command_string,
                     payload,
                 };
-                self.queue.push(message).map_err(|_| Error::QueueFull)?;
+                self.queue
+                    .push(NetEvent::Message(message))
+                    .map_err(|_| Error::QueueFull)?;
             }
         }
         Ok(())

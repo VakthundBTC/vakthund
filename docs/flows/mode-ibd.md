@@ -4,7 +4,14 @@ During IBD all other processes are paused, except maintaining the connections wi
 Messages in the `block-sync` queue that are not part of the IBD are skipped. A message is part of the IBD when it
 answers a request `block-sync` sent for the IBD.
 
-The node enters IBD on first launch, when the database is clear and tip is genesis block.
+The node enters IBD at start-up when the tip is the genesis block or the tip's chain work is below
+`minimum_chain_work` ([configuration](../modules/block-sync/README.md#configuration)); otherwise it starts in standard
+mode. So a node restarted during IBD continues IBD from its tip.
+
+IBD ends when every block of the downloaded headers is connected. If the tip's chain work is then still below
+`minimum_chain_work`, the sync peer was behind: it has failed, and IBD starts again with another
+peer ([failed block request](../modules/block-sync/README.md#failed-block-request)). Otherwise `block-sync` switches to
+standard mode.
 
 ## Downloading headers
 
@@ -56,24 +63,25 @@ Blocks are downloaded from the beginning ([block download](../modules/block-sync
 1. The current tip block is at height `tip`: all headers, and all blocks up to and including the tip block, are
    validated and stored.
 2. `block-sync` knows the candidate headers `tip+1 ...`. Blocks which are already stored are not requested. For the
-   others it sends `getdata` (`MSG_WITNESS_BLOCK`) to the sync peer; if the sync peer does not answer, to random
-   eligible peers ([peer selection](../modules/block-sync/README.md#peer-selection)). Requests are made in batches (
-   TBD).
+   others it sends `getdata` (`MSG_WITNESS_BLOCK`) to the sync peer. Requests are made in batches (TBD).
 3. When a block is received, `block-sync` calls `chain.store_block` with it. If the block is rejected:
-    - `rejected {mutated}`: `block-sync` requests the block from another eligible peer.
+    - `rejected {mutated}`: the request has failed (step 5).
     - `rejected {consensus}`: `block-sync` reports a consensus failure and the node stops.
 4. When the block `tip+1` is stored, `block-sync` calls `chain.connect_block` with its hash. If the block is valid,
    `chain` moves the tip to it and `block-sync` continues from step 1. Otherwise the block is invalid by consensus while
    its header is valid: `block-sync` reports a consensus failure and the node stops.
-5. If a block is unavailable from every eligible peer, `block-sync` switches to standard mode on the current tip
-   ([unavailable block](../modules/block-sync/README.md#unavailable-block)).
+5. If a block request fails (request timeout, `notfound`, a mutated block, or the sync peer disconnects), the sync peer
+   has failed ([failed block request](../modules/block-sync/README.md#failed-block-request)): `block-sync` selects
+   another connected peer as the sync peer and starts IBD again from [downloading headers](#downloading-headers). The
+   locator starts with the tip, so the new sync peer answers from the first block not connected yet; the headers after
+   it are downloaded, validated and stored again.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant BS as block-sync
     participant N as net
-    participant P as sync peer, then random peers
+    participant P as sync peer
     participant C as chain
     BS ->> C: chain.tip()
     C -->> BS: tip
@@ -82,14 +90,14 @@ sequenceDiagram
     N -) P: getdata
     P -) N: block[tip+1..tip+n]
     N -) BS: queue: {peer, "block", block[tip+1..tip+n]}
-    Note over BS: if no answer within the request timeout, or notfound —<br/>request the missing blocks from a random connected peer,<br/>unavailable from every peer — standard mode
+    Note over BS: if no answer within the request timeout, or notfound —<br/>another sync peer, IBD starts again from the headers
     loop for each received block
         BS ->> C: chain.store_block(block)
         alt stored
             C -->> BS: stored
         else mutated
             C -->> BS: rejected {mutated, reason}
-            Note over BS: request the block from another eligible peer
+            Note over BS: another sync peer, IBD starts again from the headers
         else invalid
             C -->> BS: rejected {consensus, reason}
             Note over BS: consensus failure, the node stops

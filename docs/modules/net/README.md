@@ -38,6 +38,9 @@ starts the connection flow again after `reconnect_delay_secs`. This goes on unti
 Adding a peer does not connect it; a removed configured peer comes back at the next
 start-up. `net` does not accept inbound connections.
 
+`net` pushes peer events to the `block-sync` queue: `peer connected {id}` when a peer becomes `connected`, and
+`peer disconnected {id}` when a `connected` peer becomes `known`.
+
 ---
 
 ## Connection flow

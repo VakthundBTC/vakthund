@@ -1,9 +1,14 @@
 # Mode: Reorg
 
 Reorg mode covers the disconnection of the node's blocks and the connection of the alternative chain's blocks. It
-starts only when every block of the alternative chain is stored, so it sends no requests. During reorg mode all other
-processes are paused, except maintaining the connections with peers; messages in the `block-sync` queue are consumed and
-discarded.
+starts only when every block of the alternative chain is stored, so the reorg itself sends no requests. Appending
+blocks to the tip ([append new header](mode-standard.md#append-new-header)) runs in reorg mode too, with k = 0: no block
+is disconnected.
+
+During reorg mode the other [candidates](../modules/block-sync/README.md#candidates) keep working: announcements are
+received, headers validated, the LCA search runs, blocks are fetched and stored. The decisions made against the tip —
+the LCA, the chain-work comparison, the start of the next reorg — wait for the reorg to end, because the active chain
+is being rewritten. Only one reorg runs at a time.
 
 Reorg happens if in the standard mode, we found a valid chain of headers A..B, where A belongs to the node's current
 chain, every header (A+1)..B does not belong to the node's chain and the chain work of B is greater than the chain work
@@ -19,18 +24,19 @@ A reorg proceeds as follows, with k = tip − height(A):
 
 1. `block-sync` stores the headers (A+1)..B with `chain.store_headers`.
 2. `block-sync` downloads the blocks (A+1)..B ([block download](../modules/block-sync/README.md#block-download)): blocks
-   that are already stored are not requested; the others are requested from the peer that announced B, and if it does
-   not answer, from random eligible peers ([peer selection](../modules/block-sync/README.md#peer-selection)); each
-   received block is stored with `chain.store_block` (a mutated block is requested from another eligible peer; a
-   consensus rejection stops the node). During the block download, the node continues working in standard mode. If a
-   block is unavailable from every eligible peer, the reorg is
-   abandoned ([unavailable block](../modules/block-sync/README.md#unavailable-block)): the headers and the blocks stored
-   so far stay, nothing else changes.
-3. When every block of (A+1)..B is stored, `block-sync` enters reorg mode.
+   that are already stored are not requested; the others are requested from the peer that announced B
+   ([peer selection](../modules/block-sync/README.md#peer-selection)); each received block is stored with
+   `chain.store_block` (a consensus rejection stops the node). During the block download, the node continues working
+   in standard mode. If a block request fails, including a mutated block, the reorg of this candidate is
+   abandoned ([failed block request](../modules/block-sync/README.md#failed-block-request)): the headers and the blocks
+   stored so far stay, nothing else changes.
+3. When every block of (A+1)..B is stored, `block-sync` enters reorg mode, unless another candidate was connected
+   first ([candidates](../modules/block-sync/README.md#candidates)).
 4. `block-sync` calls `chain.disconnect_tip` k times. The tip block is then A.
 5. `block-sync` calls `chain.connect_block` for (A+1)..B in height order. A rejected block is a consensus failure:
    `block-sync` reports it and the node stops.
-6. `block-sync` enters standard mode.
+6. `block-sync` enters standard mode. Every other candidate finds its LCA and compares its chain work against the new
+   tip again ([candidates](../modules/block-sync/README.md#candidates)).
 
 ```mermaid
 sequenceDiagram
@@ -38,7 +44,7 @@ sequenceDiagram
     participant N as net
     participant BS as block-sync
     participant C as chain
-    participant P as announcing peer, then random peers
+    participant P as announcing peer
     Note over BS: knows alternative chain of headers tip-k ... tip+1, where tip-k is A (the LCA)
     BS ->> C: chain.validate_headers(tip-k+1 ... tip+1)
     C -->> BS: ok
@@ -50,7 +56,7 @@ sequenceDiagram
         N -) P: getdata
         P -) N: block
         N -) BS: queue: {peer, "block", block}
-        Note over BS: if no answer within the request timeout, or notfound —<br/>request the block from a random connected peer,<br/>unavailable from every peer — abandon the reorg
+        Note over BS: if no answer within the request timeout, or notfound —<br/>abandon the reorg of this candidate
         BS ->> C: chain.store_block(block)
         C -->> BS: stored, or rejected {mutated | consensus, reason}
     end

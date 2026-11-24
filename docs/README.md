@@ -1,7 +1,7 @@
 # Vakthund v0.1 specification
 
 Vakthund is a Bitcoin full node. v0.1 is a single process made of separate modules that interact through direct calls and
-in-memory queues.
+in-memory queues ([overview](architecture/overview.md#process-and-modules)).
 
 v0.1:
 
