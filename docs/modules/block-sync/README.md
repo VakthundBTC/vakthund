@@ -19,8 +19,10 @@ It selects peers using [net](../net/README.md) as the CRUD for peers.
 | Standard | [mode-standard.md](../../flows/mode-standard.md) |
 | Reorg    | [mode-reorg.md](../../flows/mode-reorg.md)       |
 
-During IBD and reorg, all other processes are paused, except maintaining the connections with peers. Messages in the
-queue that are not part of the running IBD or reorg are skipped.
+During IBD all other processes are paused, except maintaining the connections with peers; messages in the queue that are
+not part of the IBD are skipped. During reorg mode the [candidates](#candidates) keep receiving announcements and
+downloading; only the decisions made against the tip wait until the reorg ends
+([mode-reorg.md](../../flows/mode-reorg.md)).
 
 At start-up `block-sync` enters IBD when the tip is the genesis block or its chain work is below `minimum_chain_work`,
 and standard mode otherwise. IBD switches to standard mode once its blocks are connected and the tip's chain work has
@@ -59,6 +61,42 @@ what a failed request means for it: header download in [IBD](../../flows/mode-ib
 download in [failed block request](#failed-block-request), the LCA search in
 [standard mode](../../flows/mode-standard.md#processing-headers).
 
+### Internal structure
+
+`block-sync` is a shell around state machines. A machine holds a flow's logic and does no I/O: it takes an input with
+a read-only context (the tip, `minimum_chain_work`, the peer book) and returns effects: messages to send to peers,
+requests to `chain`, blocks to fetch, a mode change. The shell carries the effects out: it sends, keeps every request
+with its deadline in one registry, and routes each answer, failure and message to the machine that owns it.
+
+| Machine                      | Exists                     | States                                                                                     |
+|------------------------------|----------------------------|--------------------------------------------------------------------------------------------|
+| IBD                          | in IBD                     | waiting for a peer, headers, validating, storing headers, blocks                           |
+| Peer, one per connected peer | in standard and reorg mode | idle, validating, searching, finding the LCA, waiting for the tip, downloading, ready      |
+| Reorg                        | in reorg mode              | disconnecting, connecting                                                                  |
+| Block fetcher                | always                     | per block: checking `has_block`, requested from a peer, storing                            |
+
+- Mode changes are effects: a finished IBD enters standard mode; a ready peer machine starts reorg mode; a finished
+  reorg enters standard mode and tells every peer machine that the tip changed.
+- The block fetcher keeps one request per block for every machine that needs it, and tells them when a block is
+  stored or its request failed.
+- An unsolicited message goes to the sender's peer machine in standard and reorg mode, and is dropped in IBD.
+- The peer book holds what `block-sync` learns about each connected peer, for metrics: the best header it announced,
+  when it last announced, requests sent and failed, invalid headers, blocks served. The shell updates it; machines only
+  read it.
+
+Machines never call each other. A machine that has something to tell others emits an internal event; the shell queues
+it and delivers it, in order, before it reads the next event from `net`, `chain` or a deadline. So after every event
+each machine's state agrees with the current tip and mode. Delivery is eager: a machine waiting for the tip continues
+as soon as it changes, not on its peer's next announcement.
+
+| Internal event       | Emitted by    | Delivered to                                     |
+|----------------------|---------------|--------------------------------------------------|
+| tip changed          | shell         | every peer machine                               |
+| block stored         | block fetcher | the machines that asked for the block            |
+| block request failed | block fetcher | the machines that asked for the block            |
+
+The states, events and transitions of every machine: [machines.md](machines.md).
+
 ### Candidates
 
 In standard mode a candidate is a chain announced by a peer that the node may extend its chain with or switch to. It
@@ -69,9 +107,14 @@ A newer announcement from the same peer replaces its candidate.
 
 Several candidates may download at the same time, usually the same chain announced by several peers; a block already
 requested for one candidate is not requested again for another. The first candidate whose blocks are all stored is
-connected through reorg mode, with k = 0 for an appended chain. Then every other candidate is dropped. Headers and
-blocks stored for them stay; a peer whose chain still has more work announces it again with its next block, and the
-stored blocks are not downloaded again (`has_block`).
+connected through reorg mode, with k = 0 for an appended chain. The other candidates keep their headers and blocks:
+when the reorg ends, each one finds its LCA and compares its chain work against the new tip again. One whose headers
+are now all on the active chain, or whose chain has at most the new tip's chain work, is dropped; the others continue,
+and their stored blocks are not downloaded again (`has_block`).
+
+The decisions made against the tip are the LCA, the chain-work comparison and the start of a reorg. A candidate that
+reaches one of them during reorg mode waits for the reorg to end; everything else — validating its headers, the LCA
+search's `getheaders` loop, fetching and storing its blocks — goes on.
 
 --- 
 

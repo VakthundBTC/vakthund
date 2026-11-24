@@ -20,6 +20,9 @@ pub enum BlockSyncError {
     /// The answer does not match its request's call.
     #[error("unexpected answer from chain")]
     UnexpectedAnswer,
+    /// Internal events kept causing each other: a bug.
+    #[error("too many internal events for one event")]
+    InternalLoop,
     #[error("a queue of block-sync has closed")]
     Closed,
 }

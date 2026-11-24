@@ -53,11 +53,11 @@ Modules are kept separable so that each interaction can later be carried by a me
 
 The node is in one of three modes, owned by `block-sync`:
 
-| Mode     | Flow                                          | Other processes                              |
-|----------|-----------------------------------------------|----------------------------------------------|
-| IBD      | [mode-ibd.md](../flows/mode-ibd.md)           | Paused, except maintaining peer connections. |
-| Standard | [mode-standard.md](../flows/mode-standard.md) | —                                            |
-| Reorg    | [mode-reorg.md](../flows/mode-reorg.md)       | Paused, except maintaining peer connections. |
+| Mode     | Flow                                          | Other processes                                                          |
+|----------|-----------------------------------------------|--------------------------------------------------------------------------|
+| IBD      | [mode-ibd.md](../flows/mode-ibd.md)           | Paused, except maintaining peer connections.                             |
+| Standard | [mode-standard.md](../flows/mode-standard.md) | —                                                                        |
+| Reorg    | [mode-reorg.md](../flows/mode-reorg.md)       | Candidates keep downloading; decisions made against the tip wait for it. |
 
 ## Lifecycle
 

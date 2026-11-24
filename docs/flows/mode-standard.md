@@ -152,7 +152,7 @@ requested. The others are requested from the peer that announced H
 them with `chain.connect_block` in height order. A failed block request drops the download
 ([failed block request](../modules/block-sync/README.md#failed-block-request)): the headers stay stored, another
 candidate that needs the block requests it from its own peer, and otherwise the blocks are requested again on the next
-announcement. A download is also dropped when another candidate is connected first
+announcement. When another candidate is connected first, this one is checked against the new tip again
 ([candidates](../modules/block-sync/README.md#candidates)).
 
 ```mermaid

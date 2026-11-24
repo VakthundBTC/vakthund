@@ -1,157 +1,96 @@
-//! One task owns the state and handles every event in turn: `net` events, `chain` answers and
-//! deadlines. [`BlockSync::decide`] turns an event into the handlers it calls for;
-//! [`BlockSync::handle`] runs them (`crate::handlers`).
+//! The shell around the machines (`docs/modules/block-sync/README.md`, "Internal structure"):
+//! it reads events, routes them to the machines, and carries out their effects. One event, and
+//! every internal event it causes, is handled before the next is read.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bitcoin::block::Header;
 use bitcoin::pow::Work;
-use bitcoin::{Block, BlockHash, BlockHeight, Network};
-use interfaces::chain::{
-    ChainCall, ChainError, ChainRequest, ChainResponse, ChainResult, HeaderEntry, Tip,
-    ValidatedHeaders,
-};
+use bitcoin::{Block, BlockHeight, Network};
+use interfaces::chain::{ChainCall, ChainRequest, ChainResponse, ChainResult, Tip};
 use interfaces::net::{Net, PeerId};
 use interfaces::queue::{NetEvent, Queue, RoutedMessage};
 use tokio::sync::mpsc;
 use tokio::time::{self, Instant};
 
+use crate::book::PeerBook;
 use crate::config::BlockSyncConfig;
 use crate::error::BlockSyncError;
+use crate::machines::fetcher::{self, BlockFetcher};
+use crate::machines::ibd::{self, IbdMachine};
+use crate::machines::peer::{self, PeerMachine};
+use crate::machines::reorg::{self, ReorgMachine};
+use crate::machines::{Effect, Input, Internal, Machine, ModeChange, Owner};
 use crate::messages::{self, PeerMessage};
 use crate::queue::{self, QueueReceiver};
-use crate::requests::{Answer, Answered, Request, Requests};
-use crate::state::{HeadersPurpose, Ibd, IbdPhase, PeerData, Resolution, Status};
+use crate::registry::{Expired, Registry};
+
+/// Requests to `chain` the machines that pipeline them keep in flight at most. The chain queue
+/// must hold at least this many, and a few per peer more.
+const MAX_CHAIN_IN_FLIGHT: usize = 256;
+/// block-sync's answer queue: the pipelined requests and the peer machines' few.
+const ANSWER_QUEUE: usize = 4 * MAX_CHAIN_IN_FLIGHT;
+/// Internal events one event may cause; more is a bug.
+const MAX_DELIVERIES: usize = 1_000_000;
 
 pub struct BlockSync<N> {
-    pub(crate) net: Arc<N>,
-    /// Everything block-sync waits for, to `chain` and to peers.
-    pub(crate) requests: Requests,
+    net: Arc<N>,
+    chain: Arc<dyn Queue<ChainRequest>>,
+    /// Named in every request to `chain`.
+    answer_queue: Arc<dyn Queue<ChainResponse>>,
     events: mpsc::Receiver<NetEvent>,
     answers: mpsc::Receiver<ChainResponse>,
-    pub(crate) timeout: Duration,
-    /// IBD lasts while the tip has less chain work.
-    pub(crate) minimum_chain_work: Work,
-    /// The tip as `chain`'s answers have left it. Only block-sync changes the tip, so this is
-    /// exact once its tip-changing requests are answered.
-    pub(crate) tip: Tip,
-    pub(crate) status: Status,
-    /// The connected peers.
-    pub(crate) peers: HashMap<PeerId, PeerData>,
+    timeout: Duration,
+    minimum_chain_work: Work,
+    /// The tip as `chain`'s answers have left it. Only block-sync changes the tip.
+    tip: Tip,
+    mode: Mode,
+    /// In standard and reorg mode.
+    peers: HashMap<PeerId, PeerMachine>,
+    fetcher: BlockFetcher,
+    book: PeerBook,
+    registry: Registry<Token>,
+}
+
+enum Mode {
+    Ibd(IbdMachine),
+    Standard,
+    Reorg(ReorgMachine),
+}
+
+/// A request's owner and the owner's token.
+enum Token {
+    StartUpTip,
+    Ibd(ibd::Token),
+    Peer(PeerId, peer::Token),
+    Reorg(reorg::Token),
+    Fetcher(fetcher::Token),
+}
+
+/// An input on its way to a machine.
+enum Delivery {
+    Ibd(Input<ibd::Token>),
+    Peer(PeerId, Input<peer::Token>),
+    Reorg(Input<reorg::Token>),
+    Fetcher(Input<fetcher::Token>),
+}
+
+/// What answered a request, before it becomes the owner's input.
+enum Answer {
+    Headers(Vec<Header>),
+    Block(Block),
+    Chain(ChainResult),
+    Failed,
+    Wake,
 }
 
 enum Event {
     Net(NetEvent),
     Chain(ChainResponse),
     Deadlines(Instant),
-}
-
-/// What block-sync does next, with exactly the data its handler takes.
-enum Handler {
-    PeerConnected(PeerId),
-    PeerDisconnected(PeerId),
-    /// The locator is ready: send the `getheaders`.
-    LocatorReady {
-        peer: PeerId,
-        locator: Vec<BlockHash>,
-        purpose: HeadersPurpose,
-    },
-    IbdHeaders {
-        peer: PeerId,
-        headers: Vec<Header>,
-    },
-    IbdHeadersValid {
-        headers: Vec<Header>,
-    },
-    /// `headers[..valid]` are valid.
-    IbdHeadersInvalid {
-        peer: PeerId,
-        headers: Vec<Header>,
-        valid: usize,
-    },
-    IbdHeadersStored {
-        hashes: Vec<BlockHash>,
-    },
-    SearchHeaders {
-        peer: PeerId,
-        target: BlockHash,
-        collected: Vec<Header>,
-        headers: Vec<Header>,
-    },
-    AnnouncedHeaders {
-        peer: PeerId,
-        headers: Vec<Header>,
-    },
-    Inv {
-        peer: PeerId,
-        hashes: Vec<BlockHash>,
-    },
-    /// The last hash an `inv` announced has no stored header.
-    InvUnknown {
-        peer: PeerId,
-        hash: BlockHash,
-    },
-    CandidateValid {
-        peer: PeerId,
-        headers: Vec<Header>,
-        validated: ValidatedHeaders,
-    },
-    CandidateNotConnected {
-        peer: PeerId,
-        headers: Vec<Header>,
-        searched: bool,
-    },
-    CandidateRejected {
-        peer: PeerId,
-    },
-    LcaActive {
-        peer: PeerId,
-        resolution: Resolution,
-        active: Option<BlockHash>,
-    },
-    LcaParent {
-        peer: PeerId,
-        resolution: Resolution,
-        parent: Option<HeaderEntry>,
-    },
-    SkipActive {
-        peer: PeerId,
-        resolution: Resolution,
-        active: Option<BlockHash>,
-    },
-    /// The block is not stored: request it.
-    BlockMissing {
-        peer: PeerId,
-        hash: BlockHash,
-    },
-    /// A requested block, or in standard mode a late or unsolicited one.
-    Block {
-        peer: PeerId,
-        block: Block,
-        requested: bool,
-    },
-    BlockStored {
-        hash: BlockHash,
-    },
-    BlockConnected {
-        hash: BlockHash,
-        tip: Tip,
-    },
-    TipDisconnected {
-        tip: Tip,
-    },
-    HeadersRequestFailed {
-        peer: PeerId,
-        purpose: HeadersPurpose,
-    },
-    BlockRequestFailed {
-        peer: PeerId,
-        hash: BlockHash,
-    },
-    IbdRestart,
 }
 
 impl<N: Net> BlockSync<N> {
@@ -165,442 +104,362 @@ impl<N: Net> BlockSync<N> {
         events: QueueReceiver<NetEvent>,
     ) -> Result<Self, BlockSyncError> {
         let timeout = Duration::from_secs(config.request_timeout_secs);
-        // As large as the requests in flight, so `chain` never finds it full.
-        let (answers_tx, answers) = queue::channel(Requests::MAX_CHAIN_IN_FLIGHT);
+        let (answers_tx, answers) = queue::channel(ANSWER_QUEUE);
+        let answer_queue: Arc<dyn Queue<ChainResponse>> = Arc::new(answers_tx);
         let mut answers = answers.0;
-        let mut requests = Requests::new(chain, Arc::new(answers_tx), timeout);
-        let tip = request_tip(&mut requests, &mut answers).await?;
+        let mut registry = Registry::new(timeout);
+        let id = registry.chain(Token::StartUpTip);
+        let request = ChainRequest {
+            id,
+            reply: Arc::clone(&answer_queue),
+            call: ChainCall::Tip,
+        };
+        chain
+            .push(request)
+            .map_err(|_| BlockSyncError::ChainQueueFull)?;
+        // The only request in flight, so the first answer is its answer.
+        let answer = answers.recv().await.ok_or(BlockSyncError::Closed)?;
+        let tip = match (registry.take_chain(answer.id), answer.result) {
+            (Some(Token::StartUpTip), ChainResult::Tip(tip)) => tip?,
+            _ => return Err(BlockSyncError::UnexpectedAnswer),
+        };
         let minimum_chain_work = config.minimum_chain_work(network);
+        // `docs/flows/mode-ibd.md`: IBD when the tip is genesis or below the minimum chain work.
+        let mode = if tip.height == BlockHeight::ZERO || tip.chain_work < minimum_chain_work {
+            Mode::Ibd(IbdMachine::default())
+        } else {
+            Mode::Standard
+        };
         Ok(Self {
             net,
-            requests,
+            chain,
+            answer_queue,
             events: events.0,
             answers,
             timeout,
             minimum_chain_work,
             tip,
-            status: first_status(&tip, minimum_chain_work),
+            mode,
             peers: HashMap::new(),
+            fetcher: BlockFetcher::default(),
+            book: PeerBook::default(),
+            registry,
         })
     }
 
     /// Returns only on a node failure.
     pub async fn run(mut self) -> Result<Infallible, BlockSyncError> {
         loop {
-            let deadline = earliest(self.requests.next_deadline(), self.ibd_restart_at());
+            let deadline = self.registry.next_deadline();
             let event = tokio::select! {
-                // Answers first: they free room for requests and unblock the flows.
+                // Answers first: they free room for requests.
                 biased;
                 answer = self.answers.recv() => Event::Chain(answer.ok_or(BlockSyncError::Closed)?),
                 event = self.events.recv() => Event::Net(event.ok_or(BlockSyncError::Closed)?),
                 () = sleep_until(deadline) => Event::Deadlines(Instant::now()),
             };
-            for handler in self.decide(event)? {
-                self.handle(handler).await?;
-            }
-            self.advance()?;
+            self.process(event).await?;
         }
     }
 
-    /// Routing only: it may update `requests` (taking the request an answer ends), never the
-    /// flows' state.
-    fn decide(&mut self, event: Event) -> Result<Vec<Handler>, BlockSyncError> {
+    /// The event, the internal events it causes, then [`Input::Advance`] for the machines that
+    /// send within the room for requests to `chain`.
+    async fn process(&mut self, event: Event) -> Result<(), BlockSyncError> {
+        let mut queue = VecDeque::new();
+        self.route(event, &mut queue)?;
+        self.drain(&mut queue).await?;
+        match self.mode {
+            Mode::Ibd(_) => queue.push_back(Delivery::Ibd(Input::Advance)),
+            Mode::Reorg(_) => queue.push_back(Delivery::Reorg(Input::Advance)),
+            Mode::Standard => {}
+        }
+        queue.push_back(Delivery::Fetcher(Input::Advance));
+        self.drain(&mut queue).await
+    }
+
+    /// `docs/modules/block-sync/machines.md`, "Events and routing".
+    fn route(
+        &mut self,
+        event: Event,
+        queue: &mut VecDeque<Delivery>,
+    ) -> Result<(), BlockSyncError> {
+        let ibd = matches!(self.mode, Mode::Ibd(_));
         match event {
-            Event::Net(NetEvent::PeerConnected(peer)) => Ok(vec![Handler::PeerConnected(peer)]),
-            Event::Net(NetEvent::PeerDisconnected(peer)) => {
-                Ok(vec![Handler::PeerDisconnected(peer)])
+            Event::Net(NetEvent::PeerConnected(peer)) => {
+                self.book.connected(peer, Instant::now());
+                if ibd {
+                    queue.push_back(Delivery::Ibd(Input::PeerConnected));
+                } else {
+                    self.peers.insert(peer, PeerMachine::new(peer));
+                }
             }
-            Event::Net(NetEvent::Message(message)) => self.decide_message(message),
+            Event::Net(NetEvent::PeerDisconnected(peer)) => {
+                self.book.disconnected(peer);
+                self.registry.end_peer(peer);
+                self.peers.remove(&peer);
+                queue.push_back(Delivery::Fetcher(Input::PeerDisconnected(peer)));
+                if ibd {
+                    queue.push_back(Delivery::Ibd(Input::PeerDisconnected(peer)));
+                }
+            }
+            Event::Net(NetEvent::Message(message)) => self.route_message(message, queue),
             Event::Chain(answer) => {
-                let Some(answered) = self.requests.chain_answered(answer.id) else {
-                    return Err(BlockSyncError::UnexpectedAnswer);
-                };
-                Ok(answer_handler(answered, Answer::Chain(answer.result))?
-                    .into_iter()
-                    .collect())
+                let token = self
+                    .registry
+                    .take_chain(answer.id)
+                    .ok_or(BlockSyncError::UnexpectedAnswer)?;
+                // The shell keeps the tip from every answer that moves it.
+                match &answer.result {
+                    ChainResult::ConnectBlock(Ok(tip)) | ChainResult::DisconnectTip(Ok(tip)) => {
+                        self.tip = *tip;
+                    }
+                    _ => {}
+                }
+                queue.extend(answer_delivery(token, Answer::Chain(answer.result))?);
             }
             Event::Deadlines(now) => {
-                let mut handlers: Vec<Handler> = self
-                    .requests
-                    .expired(now)
-                    .into_iter()
-                    .filter_map(timeout_handler)
-                    .collect();
-                if self.ibd_restart_at().is_some_and(|at| at <= now) {
-                    handlers.push(Handler::IbdRestart);
+                for expired in self.registry.expired(now) {
+                    let (token, answer) = match expired {
+                        Expired::Failed { token, peer } => {
+                            self.book.request_failed(peer);
+                            (token, Answer::Failed)
+                        }
+                        Expired::Wake(token) => (token, Answer::Wake),
+                    };
+                    queue.extend(answer_delivery(token, answer)?);
                 }
-                Ok(handlers)
             }
         }
+        Ok(())
     }
 
-    /// Matches the message to a request in flight (`docs/modules/block-sync/README.md`, "Request
-    /// timeout"). In IBD the messages that answer no request are dropped, in reorg mode all.
-    fn decide_message(&mut self, message: RoutedMessage) -> Result<Vec<Handler>, BlockSyncError> {
+    fn route_message(&mut self, message: RoutedMessage, queue: &mut VecDeque<Delivery>) {
         let peer = message.peer;
         // `net` reports a peer connected before it routes the peer's messages.
-        if !self.peers.contains_key(&peer) {
-            return Ok(Vec::new());
+        if !self.book.contains(peer) {
+            return;
         }
         let Some(decoded) = messages::decode(&message.command, &message.payload) else {
-            return Ok(Vec::new());
+            return;
         };
-        let standard = matches!(self.status, Status::Standard);
-        let mut handlers = Vec::new();
+        let ibd = matches!(self.mode, Mode::Ibd(_));
         match decoded {
             PeerMessage::Headers(headers) => {
-                match self.requests.take_headers_answer(peer, &headers) {
-                    Some(answered) => {
-                        handlers.extend(answer_handler(answered, Answer::Headers(headers))?);
+                if let Some(token) = self.registry.take_headers(peer, &headers) {
+                    queue.extend(
+                        answer_delivery(token, Answer::Headers(headers))
+                            .ok()
+                            .flatten(),
+                    );
+                } else if !ibd {
+                    if let Some(last) = headers.last() {
+                        self.book.announced(peer, last.block_hash(), Instant::now());
                     }
-                    None if standard => handlers.push(Handler::AnnouncedHeaders { peer, headers }),
-                    None => {}
+                    queue.push_back(Delivery::Peer(peer, Input::Announced { headers }));
                 }
             }
             PeerMessage::Block(block) => {
-                match self.requests.take_block_answer(block.block_hash(), peer) {
-                    Some(answered) => {
-                        handlers.extend(answer_handler(answered, Answer::Block(block))?)
-                    }
-                    None if standard => handlers.push(Handler::Block {
-                        peer,
-                        block,
-                        requested: false,
-                    }),
-                    None => {}
+                if let Some(token) = self.registry.take_block(peer, block.block_hash()) {
+                    self.book.block_received(peer);
+                    queue.extend(answer_delivery(token, Answer::Block(block)).ok().flatten());
+                } else if !ibd {
+                    queue.push_back(Delivery::Fetcher(Input::Unsolicited { peer, block }));
                 }
             }
             PeerMessage::NotFound(hashes) => {
                 for hash in hashes {
-                    if let Some(answered) = self.requests.take_block_answer(hash, peer) {
-                        handlers.extend(answer_handler(answered, Answer::NotFound)?);
+                    if let Some(token) = self.registry.take_block(peer, hash) {
+                        self.book.request_failed(peer);
+                        queue.extend(answer_delivery(token, Answer::Failed).ok().flatten());
                     }
                 }
             }
             PeerMessage::Inv(hashes) => {
-                if standard {
-                    handlers.push(Handler::Inv { peer, hashes });
+                if !ibd {
+                    queue.push_back(Delivery::Peer(peer, Input::Inv { hashes }));
                 }
             }
         }
-        // `docs/flows/mode-reorg.md`: the requests it answers end, the messages are discarded.
-        if matches!(self.status, Status::Reorg(_)) {
-            handlers.clear();
-        }
-        Ok(handlers)
     }
 
-    async fn handle(&mut self, handler: Handler) -> Result<(), BlockSyncError> {
-        match handler {
-            Handler::PeerConnected(peer) => self.on_peer_connected(peer).await,
-            Handler::PeerDisconnected(peer) => self.on_peer_disconnected(peer).await,
-            Handler::LocatorReady {
-                peer,
-                locator,
-                purpose,
-            } => self.send_getheaders(peer, locator, purpose).await,
-            Handler::IbdHeaders { peer, headers } => self.on_ibd_headers(peer, headers).await,
-            Handler::IbdHeadersValid { headers } => self.on_ibd_headers_valid(headers),
-            Handler::IbdHeadersInvalid {
-                peer,
-                headers,
-                valid,
-            } => self.on_ibd_headers_invalid(peer, headers, valid).await,
-            Handler::IbdHeadersStored { hashes } => {
-                self.on_ibd_headers_stored(hashes);
-                Ok(())
+    async fn drain(&mut self, queue: &mut VecDeque<Delivery>) -> Result<(), BlockSyncError> {
+        let mut deliveries = 0;
+        while let Some(delivery) = queue.pop_front() {
+            deliveries += 1;
+            if deliveries > MAX_DELIVERIES {
+                return Err(BlockSyncError::InternalLoop);
             }
-            Handler::SearchHeaders {
-                peer,
-                target,
-                collected,
-                headers,
-            } => {
-                self.on_search_headers(peer, target, collected, headers)
+            self.deliver(delivery, queue).await?;
+        }
+        Ok(())
+    }
+
+    /// Builds the machine's context and runs it. An input for a machine that no longer exists
+    /// is dropped.
+    async fn deliver(
+        &mut self,
+        delivery: Delivery,
+        queue: &mut VecDeque<Delivery>,
+    ) -> Result<(), BlockSyncError> {
+        let chain_room = MAX_CHAIN_IN_FLIGHT.saturating_sub(self.registry.chain_in_flight());
+        match delivery {
+            Delivery::Ibd(input) => {
+                let Mode::Ibd(machine) = &mut self.mode else {
+                    return Ok(());
+                };
+                let context = ibd::Context {
+                    tip: self.tip,
+                    minimum_chain_work: self.minimum_chain_work,
+                    book: &self.book,
+                    now: Instant::now(),
+                    timeout: self.timeout,
+                    chain_room,
+                };
+                let effects = machine.on_input(&context, input)?;
+                self.perform(Owner::Ibd, effects, Token::Ibd, queue).await
+            }
+            Delivery::Peer(peer, input) => {
+                let reorg_running = matches!(self.mode, Mode::Reorg(_));
+                let Some(machine) = self.peers.get_mut(&peer) else {
+                    return Ok(());
+                };
+                let context = peer::Context {
+                    tip: self.tip,
+                    reorg_running,
+                };
+                let effects = machine.on_input(&context, input)?;
+                let wrap = |token| Token::Peer(peer, token);
+                self.perform(Owner::Peer(peer), effects, wrap, queue).await
+            }
+            Delivery::Reorg(input) => {
+                let Mode::Reorg(machine) = &mut self.mode else {
+                    return Ok(());
+                };
+                let effects = machine.on_input(&reorg::Context { chain_room }, input)?;
+                self.perform(Owner::Reorg, effects, Token::Reorg, queue)
                     .await
             }
-            Handler::AnnouncedHeaders { peer, headers } => self.on_announced_headers(peer, headers),
-            Handler::Inv { peer, hashes } => self.on_inv(peer, hashes),
-            Handler::InvUnknown { peer, hash } => self.on_inv_unknown(peer, hash),
-            Handler::CandidateValid {
-                peer,
-                headers,
-                validated,
-            } => self.on_candidate_valid(peer, headers, validated),
-            Handler::CandidateNotConnected {
-                peer,
-                headers,
-                searched,
-            } => self.on_candidate_not_connected(peer, headers, searched),
-            Handler::CandidateRejected { peer } => {
-                self.drop_candidate(peer);
-                Ok(())
+            Delivery::Fetcher(input) => {
+                let context = fetcher::Context { chain_room };
+                let effects = self.fetcher.on_input(&context, input)?;
+                self.perform(Owner::Fetcher, effects, Token::Fetcher, queue)
+                    .await
             }
-            Handler::LcaActive {
-                peer,
-                resolution,
-                active,
-            } => self.on_lca_active(peer, resolution, active),
-            Handler::LcaParent {
-                peer,
-                resolution,
-                parent,
-            } => self.on_lca_parent(peer, resolution, parent),
-            Handler::SkipActive {
-                peer,
-                resolution,
-                active,
-            } => self.on_skip_active(peer, resolution, active),
-            Handler::BlockMissing { peer, hash } => self.send_getdata(peer, hash).await,
-            Handler::Block {
-                peer,
-                block,
-                requested,
-            } => self.on_block(peer, block, requested),
-            Handler::BlockStored { hash } => {
-                self.on_block_stored(hash);
-                Ok(())
-            }
-            Handler::BlockConnected { hash, tip } => self.on_block_connected(hash, tip).await,
-            Handler::TipDisconnected { tip } => {
-                self.tip = tip;
-                Ok(())
-            }
-            Handler::HeadersRequestFailed { peer, purpose } => {
-                self.on_headers_request_failed(peer, purpose).await
-            }
-            Handler::BlockRequestFailed { peer, hash } => {
-                self.on_block_request_failed(peer, hash).await
-            }
-            Handler::IbdRestart => self.on_ibd_restart().await,
         }
     }
 
-    /// After every event: sends the requests the mode can send now, within the room for
-    /// requests to `chain`.
-    fn advance(&mut self) -> Result<(), BlockSyncError> {
-        match self.status {
-            Status::Ibd(_) => self.advance_ibd(),
-            Status::Standard => self.advance_candidates(),
-            Status::Reorg(_) => self.advance_reorg(),
-        }
-    }
-
-    fn ibd_restart_at(&self) -> Option<Instant> {
-        match &self.status {
-            Status::Ibd(ibd) => ibd.restart_at,
-            Status::Standard | Status::Reorg(_) => None,
-        }
-    }
-}
-
-/// `None`: the answer needs nothing more, or its request is no longer current (replaced, or
-/// its peer has gone). An error of a write is a node failure whether current or not.
-fn answer_handler(answered: Answered, answer: Answer) -> Result<Option<Handler>, BlockSyncError> {
-    let Answered { request, current } = answered;
-    let handler = match (request, answer) {
-        (Request::Locator { peer, purpose }, Answer::Chain(ChainResult::Locator(locator))) => {
-            let locator = locator?;
-            current.then_some(Handler::LocatorReady {
-                peer,
-                locator,
-                purpose,
-            })
-        }
-        (
-            Request::Headers {
-                peer,
-                purpose: HeadersPurpose::Ibd,
-                ..
-            },
-            Answer::Headers(headers),
-        ) => Some(Handler::IbdHeaders { peer, headers }),
-        (
-            Request::Headers {
-                peer,
-                purpose: HeadersPurpose::Search { target, collected },
-                ..
-            },
-            Answer::Headers(headers),
-        ) => Some(Handler::SearchHeaders {
-            peer,
-            target,
-            collected,
-            headers,
-        }),
-        (Request::Block { peer, .. }, Answer::Block(block)) => Some(Handler::Block {
-            peer,
-            block,
-            requested: true,
-        }),
-        (Request::Block { peer, hash }, Answer::NotFound) => {
-            Some(Handler::BlockRequestFailed { peer, hash })
-        }
-        (
-            Request::IbdValidateHeaders { peer, headers },
-            Answer::Chain(ChainResult::ValidateHeaders(result)),
-        ) => match result {
-            Ok(_) => Some(Handler::IbdHeadersValid { headers }),
-            Err(ChainError::InvalidHeader { index, .. }) => Some(Handler::IbdHeadersInvalid {
-                peer,
-                headers,
-                valid: index,
-            }),
-            Err(ChainError::NotConnected) => Some(Handler::IbdHeadersInvalid {
-                peer,
-                headers,
-                valid: 0,
-            }),
-            Err(error) => return Err(error.into()),
-        },
-        (Request::IbdStoreHeaders { hashes }, Answer::Chain(ChainResult::StoreHeaders(result))) => {
-            result?;
-            Some(Handler::IbdHeadersStored { hashes })
-        }
-        (
-            Request::ValidateCandidate {
-                peer,
-                headers,
-                searched,
-            },
-            Answer::Chain(ChainResult::ValidateHeaders(result)),
-        ) => match result {
-            Ok(validated) => current.then_some(Handler::CandidateValid {
-                peer,
-                headers,
-                validated,
-            }),
-            Err(ChainError::NotConnected) => current.then_some(Handler::CandidateNotConnected {
-                peer,
-                headers,
-                searched,
-            }),
-            // The docs do not cover invalid announced headers: the candidate is dropped.
-            Err(ChainError::InvalidHeader { .. }) => {
-                current.then_some(Handler::CandidateRejected { peer })
-            }
-            Err(error) => return Err(error.into()),
-        },
-        (Request::LcaActive { peer, resolution }, Answer::Chain(ChainResult::HeaderAt(entry))) => {
-            let active = entry?.map(|entry| entry.header.block_hash());
-            current.then_some(Handler::LcaActive {
-                peer,
-                resolution,
-                active,
-            })
-        }
-        (Request::LcaParent { peer, resolution }, Answer::Chain(ChainResult::Header(entry))) => {
-            let parent = entry?;
-            current.then_some(Handler::LcaParent {
-                peer,
-                resolution,
-                parent,
-            })
-        }
-        (Request::SkipActive { peer, resolution }, Answer::Chain(ChainResult::HeaderAt(entry))) => {
-            let active = entry?.map(|entry| entry.header.block_hash());
-            current.then_some(Handler::SkipActive {
-                peer,
-                resolution,
-                active,
-            })
-        }
-        (Request::InvHeader { peer, hash }, Answer::Chain(ChainResult::Header(entry))) => {
-            let known = entry?.is_some();
-            (current && !known).then_some(Handler::InvUnknown { peer, hash })
-        }
-        (Request::StoreCandidateHeaders, Answer::Chain(ChainResult::StoreHeaders(result))) => {
-            result?;
-            None
-        }
-        (Request::HasBlock { peer, hash }, Answer::Chain(ChainResult::Header(entry))) => {
-            match entry? {
-                Some(entry) if entry.has_block => Some(Handler::BlockStored { hash }),
-                _ => current.then_some(Handler::BlockMissing { peer, hash }),
-            }
-        }
-        (Request::StoreBlock { peer, hash }, Answer::Chain(ChainResult::StoreBlock(result))) => {
-            match result {
-                Ok(()) => Some(Handler::BlockStored { hash }),
-                Err(ChainError::Mutated { .. }) => {
-                    current.then_some(Handler::BlockRequestFailed { peer, hash })
+    async fn perform<T>(
+        &mut self,
+        owner: Owner,
+        effects: Vec<Effect<T>>,
+        wrap: impl Fn(T) -> Token,
+        queue: &mut VecDeque<Delivery>,
+    ) -> Result<(), BlockSyncError> {
+        for effect in effects {
+            match effect {
+                Effect::GetHeaders {
+                    peer,
+                    locator,
+                    stop,
+                    token,
+                } => {
+                    let (command, payload) = messages::getheaders(&locator, stop)?;
+                    let sent = self.net.send(peer, command, payload).await.is_ok();
+                    self.book.request_sent(peer);
+                    self.registry.headers(peer, locator, wrap(token), sent);
                 }
-                Err(ChainError::Consensus { reason }) => {
-                    return Err(BlockSyncError::Consensus { hash, reason });
+                Effect::GetData { peer, hash, token } => {
+                    let (command, payload) = messages::getdata(hash)?;
+                    let sent = self.net.send(peer, command, payload).await.is_ok();
+                    self.book.request_sent(peer);
+                    self.registry.block(peer, hash, wrap(token), sent);
                 }
-                // An unsolicited block whose header is not stored is dropped.
-                Err(ChainError::UnknownHeader) => None,
-                Err(error) => return Err(error.into()),
+                Effect::Chain { call, token } => {
+                    let id = self.registry.chain(wrap(token));
+                    let request = ChainRequest {
+                        id,
+                        reply: Arc::clone(&self.answer_queue),
+                        call,
+                    };
+                    self.chain
+                        .push(request)
+                        .map_err(|_| BlockSyncError::ChainQueueFull)?;
+                }
+                Effect::FetchBlocks { peer, hashes } => {
+                    queue.push_back(Delivery::Fetcher(Input::Fetch {
+                        requester: owner,
+                        peer,
+                        hashes,
+                    }));
+                }
+                Effect::Wake { at, token } => self.registry.wake(at, wrap(token)),
+                Effect::Mode(change) => self.change_mode(change, queue),
+                Effect::Tell { to, event } => {
+                    queue.extend(to.into_iter().filter_map(|to| internal_delivery(to, event)));
+                }
             }
         }
-        (Request::ConnectBlock { hash }, Answer::Chain(ChainResult::ConnectBlock(result))) => {
-            match result {
-                Ok(tip) => Some(Handler::BlockConnected { hash, tip }),
-                Err(ChainError::Consensus { reason }) => {
-                    return Err(BlockSyncError::Consensus { hash, reason });
+        Ok(())
+    }
+
+    /// The mode changes first, then the machines are told.
+    fn change_mode(&mut self, change: ModeChange, queue: &mut VecDeque<Delivery>) {
+        match (change, &self.mode) {
+            (ModeChange::EnterStandard, Mode::Ibd(_)) => {
+                self.mode = Mode::Standard;
+                for peer in self.book.peers() {
+                    self.peers
+                        .entry(peer)
+                        .or_insert_with(|| PeerMachine::new(peer));
                 }
-                Err(error) => return Err(error.into()),
             }
+            (ModeChange::EnterStandard, Mode::Reorg(_)) => {
+                self.mode = Mode::Standard;
+                for &peer in self.peers.keys() {
+                    queue.push_back(Delivery::Peer(peer, Input::Internal(Internal::TipChanged)));
+                }
+            }
+            // Only one reorg runs at a time.
+            (ModeChange::StartReorg { lca_height, chain }, Mode::Standard) => {
+                self.mode = Mode::Reorg(ReorgMachine::new(self.tip.height, lca_height, chain));
+            }
+            _ => {}
         }
-        (Request::DisconnectTip, Answer::Chain(ChainResult::DisconnectTip(result))) => {
-            Some(Handler::TipDisconnected { tip: result? })
-        }
-        _ => return Err(BlockSyncError::UnexpectedAnswer),
-    };
-    Ok(handler)
-}
-
-/// Only requests to peers expire (`Requests::expired`); they have failed.
-fn timeout_handler(request: Request) -> Option<Handler> {
-    match request {
-        Request::Headers { peer, purpose, .. } => {
-            Some(Handler::HeadersRequestFailed { peer, purpose })
-        }
-        Request::Block { peer, hash } => Some(Handler::BlockRequestFailed { peer, hash }),
-        _ => None,
     }
 }
 
-/// The only request in flight, so the first answer is its answer.
-async fn request_tip(
-    requests: &mut Requests,
-    answers: &mut mpsc::Receiver<ChainResponse>,
-) -> Result<Tip, BlockSyncError> {
-    requests.send_to_chain(ChainCall::Tip, Request::StartUpTip)?;
-    let answer = answers.recv().await.ok_or(BlockSyncError::Closed)?;
-    let answered = requests.chain_answered(answer.id);
-    match (answered.map(|answered| answered.request), answer.result) {
-        (Some(Request::StartUpTip), ChainResult::Tip(tip)) => Ok(tip?),
-        _ => Err(BlockSyncError::UnexpectedAnswer),
+/// The owner's input; `Err` for the start-up tip, which is answered before the loop runs.
+fn answer_delivery(token: Token, answer: Answer) -> Result<Option<Delivery>, BlockSyncError> {
+    fn input<T>(token: T, answer: Answer) -> Input<T> {
+        match answer {
+            Answer::Headers(headers) => Input::Headers { token, headers },
+            Answer::Block(block) => Input::Block { token, block },
+            Answer::Chain(result) => Input::Chain { token, result },
+            Answer::Failed => Input::Failed { token },
+            Answer::Wake => Input::Wake { token },
+        }
     }
+    Ok(Some(match token {
+        Token::StartUpTip => return Err(BlockSyncError::UnexpectedAnswer),
+        Token::Ibd(token) => Delivery::Ibd(input(token, answer)),
+        Token::Peer(peer, token) => Delivery::Peer(peer, input(token, answer)),
+        Token::Reorg(token) => Delivery::Reorg(input(token, answer)),
+        Token::Fetcher(token) => Delivery::Fetcher(input(token, answer)),
+    }))
 }
 
-/// `docs/flows/mode-ibd.md`: IBD when the tip is genesis or has less chain work than the minimum.
-fn first_status(tip: &Tip, minimum_chain_work: Work) -> Status {
-    if tip.height == BlockHeight::ZERO || tip.chain_work < minimum_chain_work {
-        Status::Ibd(Ibd {
-            sync_peer: None,
-            tried: HashSet::new(),
-            restart_at: None,
-            phase: IbdPhase::Headers {
-                received: Vec::new(),
-            },
-        })
-    } else {
-        Status::Standard
-    }
+fn internal_delivery(owner: Owner, event: Internal) -> Option<Delivery> {
+    Some(match owner {
+        Owner::Ibd => Delivery::Ibd(Input::Internal(event)),
+        Owner::Peer(peer) => Delivery::Peer(peer, Input::Internal(event)),
+        Owner::Reorg => Delivery::Reorg(Input::Internal(event)),
+        Owner::Fetcher => Delivery::Fetcher(Input::Internal(event)),
+    })
 }
 
 async fn sleep_until(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => time::sleep_until(deadline).await,
         None => std::future::pending().await,
-    }
-}
-
-fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
     }
 }

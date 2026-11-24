@@ -1,11 +1,14 @@
 # Mode: Reorg
 
 Reorg mode covers the disconnection of the node's blocks and the connection of the alternative chain's blocks. It
-starts only when every block of the alternative chain is stored, so it sends no requests. Appending blocks to the tip
-([append new header](mode-standard.md#append-new-header)) runs in reorg mode too, with k = 0: no block is disconnected.
-During reorg mode all other processes are paused, except maintaining the connections with peers; messages in the
-`block-sync` queue are consumed and discarded, block announcements included. TBD: an announcement discarded this way is
-not processed; the next one, about 10 minutes later, catches up.
+starts only when every block of the alternative chain is stored, so the reorg itself sends no requests. Appending
+blocks to the tip ([append new header](mode-standard.md#append-new-header)) runs in reorg mode too, with k = 0: no block
+is disconnected.
+
+During reorg mode the other [candidates](../modules/block-sync/README.md#candidates) keep working: announcements are
+received, headers validated, the LCA search runs, blocks are fetched and stored. The decisions made against the tip —
+the LCA, the chain-work comparison, the start of the next reorg — wait for the reorg to end, because the active chain
+is being rewritten. Only one reorg runs at a time.
 
 Reorg happens if in the standard mode, we found a valid chain of headers A..B, where A belongs to the node's current
 chain, every header (A+1)..B does not belong to the node's chain and the chain work of B is greater than the chain work
@@ -27,12 +30,13 @@ A reorg proceeds as follows, with k = tip − height(A):
    in standard mode. If a block request fails, including a mutated block, the reorg of this candidate is
    abandoned ([failed block request](../modules/block-sync/README.md#failed-block-request)): the headers and the blocks
    stored so far stay, nothing else changes.
-3. When every block of (A+1)..B is stored, `block-sync` enters reorg mode and drops the other candidates, unless
-   another candidate was connected first ([candidates](../modules/block-sync/README.md#candidates)).
+3. When every block of (A+1)..B is stored, `block-sync` enters reorg mode, unless another candidate was connected
+   first ([candidates](../modules/block-sync/README.md#candidates)).
 4. `block-sync` calls `chain.disconnect_tip` k times. The tip block is then A.
 5. `block-sync` calls `chain.connect_block` for (A+1)..B in height order. A rejected block is a consensus failure:
    `block-sync` reports it and the node stops.
-6. `block-sync` enters standard mode.
+6. `block-sync` enters standard mode. Every other candidate finds its LCA and compares its chain work against the new
+   tip again ([candidates](../modules/block-sync/README.md#candidates)).
 
 ```mermaid
 sequenceDiagram
