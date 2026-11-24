@@ -18,11 +18,8 @@ pub struct RequestId(u64);
 
 /// A request whose deadline has passed.
 pub enum Expired<T> {
-    /// A request to the peer: it has failed.
-    Failed {
-        token: T,
-        peer: PeerId,
-    },
+    /// A request to a peer: it has failed.
+    Failed(T),
     Wake(T),
 }
 
@@ -168,14 +165,15 @@ impl<T> Registry<T> {
     pub fn expired(&mut self, now: Instant) -> Vec<Expired<T>> {
         let mut expired = Vec::new();
         for id in self.deadlines.expired(now) {
-            let peer = match self.entries.get(&id).map(|entry| &entry.kind) {
-                Some(Kind::Headers { peer, .. } | Kind::Block { peer, .. }) => Some(*peer),
-                _ => None,
-            };
+            let wake = matches!(
+                self.entries.get(&id).map(|entry| &entry.kind),
+                Some(Kind::Wake)
+            );
             if let Some(token) = self.remove(id) {
-                expired.push(match peer {
-                    Some(peer) => Expired::Failed { token, peer },
-                    None => Expired::Wake(token),
+                expired.push(if wake {
+                    Expired::Wake(token)
+                } else {
+                    Expired::Failed(token)
                 });
             }
         }

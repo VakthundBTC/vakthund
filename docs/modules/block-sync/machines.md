@@ -14,7 +14,7 @@ Every machine reads, never writes:
 | tip                  | hash, height and chain work of the tip, as `chain`'s answers have left it                    |
 | `minimum_chain_work` | the configured minimum ([configuration](README.md#configuration))                            |
 | mode                 | IBD, standard or reorg; a peer machine waits for the tip while a reorg runs                  |
-| peer book            | what is known about each connected peer ([internal structure](README.md#internal-structure)) |
+| connected peers      | the peers `net` has reported connected and not yet disconnected                              |
 
 ## Effects
 
@@ -23,7 +23,7 @@ Every machine reads, never writes:
 | send `getheaders`        | sends it to the peer and registers it, with its deadline, for the machine             |
 | request to `chain`       | sends it and registers it for the machine                                             |
 | fetch blocks from a peer | hands the block hashes to the block fetcher, which records the machine as a requester |
-| enter standard mode      | ends IBD or the reorg, creates or keeps a peer machine per connected peer             |
+| enter standard mode      | ends IBD or the reorg                                                                 |
 | start reorg mode         | creates the reorg machine with the LCA and the chain to connect                       |
 | internal event           | queues it ([internal events](README.md#internal-structure))                           |
 
@@ -34,17 +34,17 @@ The block fetcher sends `getdata` itself, as a send effect of its own.
 An answer and a passed deadline go to the machine that owns the request. A request to `chain` past its deadline is
 kept: `chain` always answers. Everything else is routed by mode:
 
-| Event                         | In IBD                                          | In standard and reorg mode                      |
-|-------------------------------|-------------------------------------------------|-------------------------------------------------|
-| peer connected                | IBD machine                                     | a new peer machine                              |
-| peer disconnected             | IBD machine, block fetcher                      | its peer machine is removed; block fetcher      |
-| `headers` answering a request | the request's owner                             | the request's owner                             |
-| `headers` not answering one   | dropped                                         | the sender's peer machine                       |
-| `inv`                         | dropped                                         | the sender's peer machine                       |
-| `block` answering a request   | block fetcher                                   | block fetcher                                   |
-| `block` not answering one     | dropped                                         | block fetcher                                   |
-| `notfound`                    | block fetcher                                   | block fetcher                                   |
-| internal event                | [internal events](README.md#internal-structure) | [internal events](README.md#internal-structure) |
+| Event                         | In IBD                                                  | In standard and reorg mode                      |
+|-------------------------------|---------------------------------------------------------|-------------------------------------------------|
+| peer connected                | a new peer machine; IBD machine                         | a new peer machine                              |
+| peer disconnected             | its peer machine is removed; IBD machine, block fetcher | its peer machine is removed; block fetcher      |
+| `headers` answering a request | the request's owner                                     | the request's owner                             |
+| `headers` not answering one   | dropped                                                 | the sender's peer machine                       |
+| `inv`                         | dropped                                                 | the sender's peer machine                       |
+| `block` answering a request   | block fetcher                                           | block fetcher                                   |
+| `block` not answering one     | dropped                                                 | block fetcher                                   |
+| `notfound`                    | block fetcher                                           | block fetcher                                   |
+| internal event                | [internal events](README.md#internal-structure)         | [internal events](README.md#internal-structure) |
 
 ---
 
@@ -98,7 +98,8 @@ answers: `chain` runs writes in request order.
 
 ## Peer machine
 
-One per connected peer, in standard and reorg mode: its [candidate](README.md#candidates).
+One per connected peer, in every mode: its [candidate](README.md#candidates). It stays Idle in IBD, where nothing is
+routed to it.
 
 ```mermaid
 stateDiagram-v2

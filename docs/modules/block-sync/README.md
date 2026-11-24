@@ -64,14 +64,14 @@ download in [failed block request](#failed-block-request), the LCA search in
 ### Internal structure
 
 `block-sync` is a shell around state machines. A machine holds a flow's logic and does no I/O: it takes an input with
-a read-only context (the tip, `minimum_chain_work`, the peer book) and returns effects: messages to send to peers,
+a read-only context (the tip, `minimum_chain_work`, the connected peers) and returns effects: messages to send to peers,
 requests to `chain`, blocks to fetch, a mode change. The shell carries the effects out: it sends, keeps every request
 with its deadline in one registry, and routes each answer, failure and message to the machine that owns it.
 
 | Machine                      | Exists                     | States                                                                                     |
 |------------------------------|----------------------------|--------------------------------------------------------------------------------------------|
 | IBD                          | in IBD                     | waiting for a peer, headers, validating, storing headers, blocks                           |
-| Peer, one per connected peer | in standard and reorg mode | idle, validating, searching, finding the LCA, waiting for the tip, downloading, ready      |
+| Peer, one per connected peer | always; idle in IBD        | idle, validating, searching, finding the LCA, waiting for the tip, downloading, ready      |
 | Reorg                        | in reorg mode              | disconnecting, connecting                                                                  |
 | Block fetcher                | always                     | per block: checking `has_block`, requested from a peer, storing                            |
 
@@ -80,9 +80,6 @@ with its deadline in one registry, and routes each answer, failure and message t
 - The block fetcher keeps one request per block for every machine that needs it, and tells them when a block is
   stored or its request failed.
 - An unsolicited message goes to the sender's peer machine in standard and reorg mode, and is dropped in IBD.
-- The peer book holds what `block-sync` learns about each connected peer, for metrics: the best header it announced,
-  when it last announced, requests sent and failed, invalid headers, blocks served. The shell updates it; machines only
-  read it.
 
 Machines never call each other. A machine that has something to tell others emits an internal event; the shell queues
 it and delivers it, in order, before it reads the next event from `net`, `chain` or a deadline. So after every event

@@ -23,7 +23,7 @@ pub enum Owner {
 }
 
 pub enum Input<T> {
-    /// The peer is in the peer book.
+    /// The peer is among the connected peers.
     PeerConnected,
     PeerDisconnected(PeerId),
     /// `headers` that answer no request.

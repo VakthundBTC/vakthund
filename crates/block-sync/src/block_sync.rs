@@ -16,7 +16,6 @@ use interfaces::queue::{NetEvent, Queue, RoutedMessage};
 use tokio::sync::mpsc;
 use tokio::time::{self, Instant};
 
-use crate::book::PeerBook;
 use crate::config::BlockSyncConfig;
 use crate::error::BlockSyncError;
 use crate::machines::fetcher::{self, BlockFetcher};
@@ -48,10 +47,9 @@ pub struct BlockSync<N> {
     /// The tip as `chain`'s answers have left it. Only block-sync changes the tip.
     tip: Tip,
     mode: Mode,
-    /// In standard and reorg mode.
+    /// One per connected peer, in every mode; Idle in IBD, where nothing is routed to them.
     peers: HashMap<PeerId, PeerMachine>,
     fetcher: BlockFetcher,
-    book: PeerBook,
     registry: Registry<Token>,
 }
 
@@ -142,7 +140,6 @@ impl<N: Net> BlockSync<N> {
             mode,
             peers: HashMap::new(),
             fetcher: BlockFetcher::default(),
-            book: PeerBook::default(),
             registry,
         })
     }
@@ -186,15 +183,12 @@ impl<N: Net> BlockSync<N> {
         let ibd = matches!(self.mode, Mode::Ibd(_));
         match event {
             Event::Net(NetEvent::PeerConnected(peer)) => {
-                self.book.connected(peer, Instant::now());
+                self.peers.insert(peer, PeerMachine::new(peer));
                 if ibd {
                     queue.push_back(Delivery::Ibd(Input::PeerConnected));
-                } else {
-                    self.peers.insert(peer, PeerMachine::new(peer));
                 }
             }
             Event::Net(NetEvent::PeerDisconnected(peer)) => {
-                self.book.disconnected(peer);
                 self.registry.end_peer(peer);
                 self.peers.remove(&peer);
                 queue.push_back(Delivery::Fetcher(Input::PeerDisconnected(peer)));
@@ -220,10 +214,7 @@ impl<N: Net> BlockSync<N> {
             Event::Deadlines(now) => {
                 for expired in self.registry.expired(now) {
                     let (token, answer) = match expired {
-                        Expired::Failed { token, peer } => {
-                            self.book.request_failed(peer);
-                            (token, Answer::Failed)
-                        }
+                        Expired::Failed(token) => (token, Answer::Failed),
                         Expired::Wake(token) => (token, Answer::Wake),
                     };
                     queue.extend(answer_delivery(token, answer)?);
@@ -236,7 +227,7 @@ impl<N: Net> BlockSync<N> {
     fn route_message(&mut self, message: RoutedMessage, queue: &mut VecDeque<Delivery>) {
         let peer = message.peer;
         // `net` reports a peer connected before it routes the peer's messages.
-        if !self.book.contains(peer) {
+        if !self.peers.contains_key(&peer) {
             return;
         }
         let Some(decoded) = messages::decode(&message.command, &message.payload) else {
@@ -252,15 +243,11 @@ impl<N: Net> BlockSync<N> {
                             .flatten(),
                     );
                 } else if !ibd {
-                    if let Some(last) = headers.last() {
-                        self.book.announced(peer, last.block_hash(), Instant::now());
-                    }
                     queue.push_back(Delivery::Peer(peer, Input::Announced { headers }));
                 }
             }
             PeerMessage::Block(block) => {
                 if let Some(token) = self.registry.take_block(peer, block.block_hash()) {
-                    self.book.block_received(peer);
                     queue.extend(answer_delivery(token, Answer::Block(block)).ok().flatten());
                 } else if !ibd {
                     queue.push_back(Delivery::Fetcher(Input::Unsolicited { peer, block }));
@@ -269,7 +256,6 @@ impl<N: Net> BlockSync<N> {
             PeerMessage::NotFound(hashes) => {
                 for hash in hashes {
                     if let Some(token) = self.registry.take_block(peer, hash) {
-                        self.book.request_failed(peer);
                         queue.extend(answer_delivery(token, Answer::Failed).ok().flatten());
                     }
                 }
@@ -310,7 +296,7 @@ impl<N: Net> BlockSync<N> {
                 let context = ibd::Context {
                     tip: self.tip,
                     minimum_chain_work: self.minimum_chain_work,
-                    book: &self.book,
+                    peers: &self.peers,
                     now: Instant::now(),
                     timeout: self.timeout,
                     chain_room,
@@ -365,13 +351,11 @@ impl<N: Net> BlockSync<N> {
                 } => {
                     let (command, payload) = messages::getheaders(&locator, stop)?;
                     let sent = self.net.send(peer, command, payload).await.is_ok();
-                    self.book.request_sent(peer);
                     self.registry.headers(peer, locator, wrap(token), sent);
                 }
                 Effect::GetData { peer, hash, token } => {
                     let (command, payload) = messages::getdata(hash)?;
                     let sent = self.net.send(peer, command, payload).await.is_ok();
-                    self.book.request_sent(peer);
                     self.registry.block(peer, hash, wrap(token), sent);
                 }
                 Effect::Chain { call, token } => {
@@ -405,14 +389,7 @@ impl<N: Net> BlockSync<N> {
     /// The mode changes first, then the machines are told.
     fn change_mode(&mut self, change: ModeChange, queue: &mut VecDeque<Delivery>) {
         match (change, &self.mode) {
-            (ModeChange::EnterStandard, Mode::Ibd(_)) => {
-                self.mode = Mode::Standard;
-                for peer in self.book.peers() {
-                    self.peers
-                        .entry(peer)
-                        .or_insert_with(|| PeerMachine::new(peer));
-                }
-            }
+            (ModeChange::EnterStandard, Mode::Ibd(_)) => self.mode = Mode::Standard,
             (ModeChange::EnterStandard, Mode::Reorg(_)) => {
                 self.mode = Mode::Standard;
                 for &peer in self.peers.keys() {

@@ -1,7 +1,7 @@
 //! The IBD machine (`docs/modules/block-sync/machines.md`, "IBD machine"): the headers from the
 //! sync peer, then their blocks, connected in height order.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use bitcoin::BlockHash;
@@ -11,10 +11,10 @@ use interfaces::chain::{ChainCall, ChainError, ChainResult, Tip};
 use interfaces::net::PeerId;
 use tokio::time::Instant;
 
+use super::peer::PeerMachine;
 use super::{
     BLOCKS_IN_FLIGHT, Effect, Effects, Input, Internal, MAX_HEADERS, Machine, ModeChange, NO_STOP,
 };
-use crate::book::PeerBook;
 use crate::error::BlockSyncError;
 
 /// How far past the next block to connect blocks are fetched: Core's `BLOCK_DOWNLOAD_WINDOW`.
@@ -23,8 +23,8 @@ const DOWNLOAD_WINDOW: usize = 1024;
 pub struct Context<'a> {
     pub tip: Tip,
     pub minimum_chain_work: Work,
-    /// The connected peers, to choose the sync peer from.
-    pub book: &'a PeerBook,
+    /// The connected peers, to choose the sync peer from. Their machines stay Idle in IBD.
+    pub peers: &'a HashMap<PeerId, PeerMachine>,
     pub now: Instant,
     pub timeout: Duration,
     /// Requests to `chain` that may still be sent, so its queue never fills up.
@@ -326,12 +326,13 @@ impl IbdMachine {
             return Vec::new();
         }
         let untried: Vec<PeerId> = context
-            .book
-            .peers()
+            .peers
+            .keys()
             .filter(|peer| !self.tried.contains(peer))
+            .copied()
             .collect();
         let Some(&peer) = untried.get(rand::random_range(0..untried.len().max(1))) else {
-            if context.book.peers().next().is_none() {
+            if context.peers.is_empty() {
                 return Vec::new();
             }
             self.tried.clear();
