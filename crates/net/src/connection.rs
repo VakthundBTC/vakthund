@@ -34,12 +34,9 @@ const USER_AGENT: &str = concat!("/vakthund:", env!("CARGO_PKG_VERSION"), "/");
 
 type Frame = (CommandString, Vec<u8>);
 
-/// `connection` tells the reports of an earlier connection task for the same peer apart: a removed
-/// and re-added peer keeps its id.
 #[derive(Debug)]
 pub struct Report {
     pub peer: PeerId,
-    pub connection: u64,
     pub event: Event,
 }
 
@@ -58,16 +55,11 @@ pub enum Event {
 }
 
 pub struct ConnectionHandle {
-    number: u64,
     outgoing: mpsc::UnboundedSender<Frame>,
     task: JoinHandle<()>,
 }
 
 impl ConnectionHandle {
-    pub fn number(&self) -> u64 {
-        self.number
-    }
-
     /// Queues the message; it is written after the features exchange.
     pub fn send(&self, command: CommandString, payload: Vec<u8>) -> Result<(), Error> {
         self.outgoing
@@ -81,10 +73,8 @@ impl ConnectionHandle {
     }
 }
 
-/// `number` must differ from the numbers of the peer's earlier connection tasks.
 pub fn spawn<Q: MessageQueue + 'static>(
     peer: PeerId,
-    number: u64,
     address: SocketAddr,
     magic: Magic,
     reconnect_delay: Duration,
@@ -94,7 +84,6 @@ pub fn spawn<Q: MessageQueue + 'static>(
     let (outgoing, mut outgoing_rx) = mpsc::unbounded_channel();
     let connection = Connection {
         peer,
-        number,
         magic,
         queue,
         reports,
@@ -113,16 +102,11 @@ pub fn spawn<Q: MessageQueue + 'static>(
             connection.report(Event::Reconnecting);
         }
     });
-    ConnectionHandle {
-        number,
-        outgoing,
-        task,
-    }
+    ConnectionHandle { outgoing, task }
 }
 
 struct Connection<Q> {
     peer: PeerId,
-    number: u64,
     magic: Magic,
     queue: Arc<Q>,
     reports: mpsc::UnboundedSender<Report>,
@@ -253,7 +237,6 @@ impl<Q: MessageQueue> Connection<Q> {
         // The receiver is gone only when net is shutting down.
         let report = Report {
             peer: self.peer,
-            connection: self.number,
             event,
         };
         let _ = self.reports.send(report);

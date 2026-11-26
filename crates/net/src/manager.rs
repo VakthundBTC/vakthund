@@ -34,7 +34,6 @@ pub struct NetManager<Q> {
 
 struct PeerRegistry {
     entries: BTreeMap<PeerId, PeerEntry>,
-    next_connection: u64,
     /// The peers known at [`NetManager::open`], which [`NetManager::run`] connects to.
     at_start_up: Vec<PeerId>,
 }
@@ -97,7 +96,6 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
         }
         let mut peers = PeerRegistry {
             entries: BTreeMap::new(),
-            next_connection: 0,
             at_start_up: Vec::new(),
         };
         for (address, features) in store.load_all::<PeerList>()? {
@@ -149,18 +147,16 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
     }
 
     async fn apply(&self, report: Report) -> Result<(), Error> {
-        let Report {
-            peer: id,
-            connection,
-            event,
-        } = report;
+        let Report { peer: id, event } = report;
         let mut peers = self.peers.lock().await;
-        // Reports of a stopped connection may still be in the channel, also when the peer has
-        // been connected again, or removed and added again, since.
+        // Reports of a stopped connection task may still be in the channel; they are dropped while
+        // the peer has no connection. If `connect` starts a new task before they are applied, they
+        // count as the new task's. Accepted: only the operator disconnects, so it takes a
+        // `disconnect` and a `connect` within moments of each other.
         let Some(entry) = peers.entries.get_mut(&id) else {
             return Ok(());
         };
-        if entry.connection.as_ref().map(ConnectionHandle::number) != Some(connection) {
+        if entry.connection.is_none() {
             return Ok(());
         }
         match event {
@@ -178,12 +174,9 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
     }
 
     fn start(&self, peers: &mut PeerRegistry, id: PeerId) -> Result<(), Error> {
-        let number = peers.next_connection;
-        peers.next_connection += 1;
         let entry = peers.get_mut(id)?;
         let handle = connection::spawn(
             id,
-            number,
             entry.address,
             self.magic,
             self.reconnect_delay,
