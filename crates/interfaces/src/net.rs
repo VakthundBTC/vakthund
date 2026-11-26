@@ -39,11 +39,13 @@ pub struct PeerFeatures {
     pub user_agent: String,
 }
 
-/// A `peer-list` row (address, features) with the peer's in-memory fields.
+/// A `peer-list` row (address, `keep_connected`, features) with the peer's in-memory fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Peer {
     pub id: PeerId,
     pub address: SocketAddr,
+    /// Set by `connect`, cleared by `disconnect`: whether the peer is connected at start-up.
+    pub keep_connected: bool,
     /// `None` until the first features exchange with the peer.
     pub features: Option<PeerFeatures>,
     pub state: PeerState,

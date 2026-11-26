@@ -1,14 +1,14 @@
 # net
 
 `net` is the module responsible for handling peers, and the CRUD for peers. It maintains the `peer-list` table: all
-known peers and the features stored for each of them. It knows nothing about messages except `ping`/`pong`, the commands
-of the connection flow, and which module must process each message.
+known peers, whether to keep each of them connected, and the features stored for each of them. It knows nothing about
+messages except `ping`/`pong`, the commands of the connection flow, and which module must process each message.
 
 ## State
 
 | State                                                       | Where             |
 |-------------------------------------------------------------|-------------------|
-| Known peers: address, features                              | table `peer-list` |
+| Known peers: address, `keep_connected`, features            | table `peer-list` |
 | Per known peer while the process runs: id, connection state | memory            |
 
 For the `peer-list` table details see ([storage.md](../../architecture/storage.md#peer-list)). In memory, per known
@@ -27,16 +27,20 @@ the same `id` back. Two addresses with the same `id` are an error.
 ## Peers
 
 Known peers come from the configuration (`peers`) and from [`add_peer`](#add_peeraddress); both are stored in
-`peer-list`. Known peers are trusted: `net` requires no services and no minimum protocol version from them. On start-up
-`net` connects to every peer in `peer-list` and every configured peer; with `clear_peer_list = true` it first empties
-`peer-list`, so only the configured peers remain.
+`peer-list`. Known peers are trusted: `net` requires no services and no minimum protocol version from them.
+
+`keep_connected` records the operator's choice, so it lasts across restarts: [`connect`](#connectid) sets it,
+[`disconnect`](#disconnectid) clears it, and [`add_peer`](#add_peeraddress) adds a peer with it cleared. On start-up
+`net` adds every configured peer that is not in `peer-list` with `keep_connected` set; for a configured peer already
+there, the stored flag wins. Then it connects to every peer whose `keep_connected` is set. With
+`clear_peer_list = true` it first empties `peer-list`, so only the configured peers remain.
 
 After start-up, `net` connects to a peer only on [`connect`](#connectid). From then on `net` keeps the peer connected:
 when the connection ends on its own (the [connection flow](#connection-flow) fails, the [pong](#pings) is missing, the
 peer sends an [invalid message](#message-exchange) or closes the connection), the peer's state becomes `known` and `net`
 starts the connection flow again after `reconnect_delay_secs`. This goes on until [`disconnect`](#disconnectid).
 Adding a peer does not connect it; a removed configured peer comes back at the next
-start-up. `net` does not accept inbound connections.
+start-up, with `keep_connected` set. `net` does not accept inbound connections.
 
 ---
 
@@ -128,8 +132,8 @@ Return the peer from `peer-list` with its in-memory fields, or not found
 
 ### add_peer(address)
 
-Adds the peer to `peer-list` as `known`; does not connect to it. For an address that is already known, returns that
-peer.
+Adds the peer to `peer-list` as `known`, with `keep_connected` cleared; does not connect to it. For an address that is
+already known, returns that peer.
 
 ### remove_peer(id)
 
@@ -140,13 +144,14 @@ well.
 
 ### connect(id)
 
-Starts the connection flow with the peer if it is `known`; does nothing if it is `connecting` or `connected`, or if
-`net` is waiting to reconnect to it.
+Sets the peer's `keep_connected`, and starts the connection flow with the peer if it is `known`; starts nothing if it
+is `connecting` or `connected`, or if `net` is waiting to reconnect to it.
 
 ### disconnect(id)
 
-Stops the connection with the peer and the reconnects to it; its state becomes `known` and it stays in `peer-list`.
-Does nothing for a `known` peer that `net` is not reconnecting to.
+Clears the peer's `keep_connected`, and stops the connection with the peer and the reconnects to it; its state becomes
+`known` and it stays in `peer-list`.
+Stops nothing for a `known` peer that `net` is not reconnecting to.
 
 ### send(id, command, payload)
 
@@ -158,7 +163,7 @@ Sends the message to the peer if it is `connected`; fails otherwise. The answer,
 
 ```toml
 [net]
-peers = []                 # peers to connect to: ["ip:port", "ip:port"]; host names are not resolved
+peers = []                 # peers to add and connect to (see "Peers"): ["ip:port"]; host names are not resolved
 clear_peer_list = false    # empty peer-list at start-up, so only the configured peers remain
 reconnect_delay_secs = 30  # delay before reconnecting to a peer whose connection ended
 ```

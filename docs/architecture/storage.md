@@ -62,9 +62,9 @@ Only valid headers are stored.
 
 ## peer-list
 
-| Table       | Key                      | Value                                                                  | Profile      |
-|-------------|--------------------------|------------------------------------------------------------------------|--------------|
-| `peer-list` | peer address (`ip:port`) | features recorded for the peer ([net](../modules/net/README.md#state)) | point lookup |
+| Table       | Key                      | Value                                                                                           | Profile      |
+|-------------|--------------------------|-------------------------------------------------------------------------------------------------|--------------|
+| `peer-list` | peer address (`ip:port`) | `keep_connected` and the features recorded for the peer ([net](../modules/net/README.md#state)) | point lookup |
 
 ----
 

@@ -11,7 +11,7 @@ use std::time::Duration;
 use bitcoin::Network;
 use bitcoin_p2p_messages::Magic;
 use bitcoin_p2p_messages::message::CommandString;
-use interfaces::net::{Net, Peer, PeerFeatures, PeerId, PeerState};
+use interfaces::net::{Net, Peer, PeerId, PeerState};
 use interfaces::queue::MessageQueue;
 use store::{Store, TableSpec};
 use tokio::sync::{Mutex, mpsc};
@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, mpsc};
 use crate::config::NetConfig;
 use crate::connection::{self, ConnectionHandle, Event, Report};
 use crate::error::Error;
-use crate::peer_list::{PeerList, peer_id};
+use crate::peer_list::{PeerList, PeerRecord, peer_id};
 
 pub struct NetManager<Q> {
     magic: Magic,
@@ -34,13 +34,12 @@ pub struct NetManager<Q> {
 
 struct PeerRegistry {
     entries: BTreeMap<PeerId, PeerEntry>,
-    /// The peers known at [`NetManager::open`], which [`NetManager::run`] connects to.
-    at_start_up: Vec<PeerId>,
 }
 
 struct PeerEntry {
     address: SocketAddr,
-    features: Option<PeerFeatures>,
+    /// As stored in `peer-list`.
+    record: PeerRecord,
     state: PeerState,
     /// Kept while the task waits to reconnect, so the peer is `Known` with a connection.
     connection: Option<ConnectionHandle>,
@@ -60,11 +59,11 @@ impl PeerRegistry {
     }
 
     /// For an address that is not known yet.
-    fn insert(&mut self, address: SocketAddr, features: Option<PeerFeatures>) -> PeerId {
+    fn insert(&mut self, address: SocketAddr, record: PeerRecord) -> PeerId {
         let id = peer_id(&address);
         let entry = PeerEntry {
             address,
-            features,
+            record,
             state: PeerState::Known,
             connection: None,
         };
@@ -96,20 +95,23 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
         }
         let mut peers = PeerRegistry {
             entries: BTreeMap::new(),
-            at_start_up: Vec::new(),
         };
-        for (address, features) in store.load_all::<PeerList>()? {
+        for (address, record) in store.load_all::<PeerList>()? {
             if !peers.contains(address)? {
-                peers.insert(address, features);
+                peers.insert(address, record);
             }
         }
+        // For a configured peer already in `peer-list`, its stored `keep_connected` wins.
         for address in &config.peers {
             if !peers.contains(*address)? {
-                store.put::<PeerList>(address, &None)?;
-                peers.insert(*address, None);
+                let record = PeerRecord {
+                    keep_connected: true,
+                    features: None,
+                };
+                store.put::<PeerList>(address, &record)?;
+                peers.insert(*address, record);
             }
         }
-        peers.at_start_up = peers.entries.keys().copied().collect();
         let (reports_tx, reports) = mpsc::unbounded_channel();
         Ok(Self {
             magic,
@@ -122,21 +124,20 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
         })
     }
 
-    /// Connects to the peers known at [`NetManager::open`], then applies the connections'
-    /// reports. Returns only on a node failure.
+    /// Connects to every peer with `keep_connected` and no connection yet, then applies the
+    /// connections' reports. Returns only on a node failure.
     pub async fn run(&self) -> Result<Infallible, Error> {
         let mut reports = self.reports.lock().await;
         {
             let mut peers = self.peers.lock().await;
-            // Since `open`, a peer may have been connected or removed through the calls.
-            for id in std::mem::take(&mut peers.at_start_up) {
-                if peers
-                    .entries
-                    .get(&id)
-                    .is_some_and(|entry| entry.connection.is_none())
-                {
-                    self.start(&mut peers, id)?;
-                }
+            let ids: Vec<PeerId> = peers
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.record.keep_connected && entry.connection.is_none())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in ids {
+                self.start(&mut peers, id)?;
             }
         }
         while let Some(report) = reports.recv().await {
@@ -162,14 +163,31 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
         match event {
             Event::Reconnecting => entry.state = PeerState::Connecting,
             Event::Connected(features) => {
-                self.store
-                    .put::<PeerList>(&entry.address, &Some(features.clone()))?;
-                entry.features = Some(features);
+                let record = PeerRecord {
+                    features: Some(features),
+                    ..entry.record.clone()
+                };
+                self.store.put::<PeerList>(&entry.address, &record)?;
+                entry.record = record;
                 entry.state = PeerState::Connected;
             }
             Event::Disconnected(_) => entry.state = PeerState::Known,
             Event::Queue(error) => return Err(error.into()),
         }
+        Ok(())
+    }
+
+    /// Written to `peer-list` first, so memory never holds a choice that is not stored.
+    fn keep_connected(&self, entry: &mut PeerEntry, keep_connected: bool) -> Result<(), Error> {
+        if entry.record.keep_connected == keep_connected {
+            return Ok(());
+        }
+        let record = PeerRecord {
+            keep_connected,
+            ..entry.record.clone()
+        };
+        self.store.put::<PeerList>(&entry.address, &record)?;
+        entry.record = record;
         Ok(())
     }
 
@@ -213,8 +231,12 @@ impl<Q: MessageQueue + 'static> Net for NetManager<Q> {
         if peers.contains(address)? {
             return Ok(peer_id(&address));
         }
-        self.store.put::<PeerList>(&address, &None)?;
-        Ok(peers.insert(address, None))
+        let record = PeerRecord {
+            keep_connected: false,
+            features: None,
+        };
+        self.store.put::<PeerList>(&address, &record)?;
+        Ok(peers.insert(address, record))
     }
 
     async fn remove_peer(&self, id: PeerId) -> Result<(), Error> {
@@ -231,8 +253,10 @@ impl<Q: MessageQueue + 'static> Net for NetManager<Q> {
 
     async fn connect(&self, id: PeerId) -> Result<(), Error> {
         let mut peers = self.peers.lock().await;
+        let entry = peers.get_mut(id)?;
+        self.keep_connected(entry, true)?;
         // A peer with a connection is connecting, connected, or waiting to reconnect.
-        if peers.get_mut(id)?.connection.is_none() {
+        if entry.connection.is_none() {
             self.start(&mut peers, id)?;
         }
         Ok(())
@@ -241,6 +265,7 @@ impl<Q: MessageQueue + 'static> Net for NetManager<Q> {
     async fn disconnect(&self, id: PeerId) -> Result<(), Error> {
         let mut peers = self.peers.lock().await;
         let entry = peers.get_mut(id)?;
+        self.keep_connected(entry, false)?;
         if let Some(connection) = entry.connection.take() {
             connection.stop();
         }
@@ -267,7 +292,8 @@ fn peer(id: PeerId, entry: &PeerEntry) -> Peer {
     Peer {
         id,
         address: entry.address,
-        features: entry.features.clone(),
+        keep_connected: entry.record.keep_connected,
+        features: entry.record.features.clone(),
         state: entry.state,
     }
 }
