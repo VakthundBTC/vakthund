@@ -13,7 +13,7 @@ use bitcoin_p2p_messages::message::{CommandString, Ping, Pong};
 use bitcoin_p2p_messages::message_network::{UserAgent, VersionMessage};
 use bitcoin_p2p_messages::{Magic, ProtocolVersion, ServiceFlags};
 use interfaces::net::{PeerFeatures, PeerId};
-use interfaces::queue::{MessageQueue, RoutedMessage};
+use interfaces::queue::{MessageQueue, QueueError, RoutedMessage};
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -53,8 +53,8 @@ pub enum Event {
     Disconnected(
         #[expect(dead_code, reason = "for logging, which the node does not have yet")] Error,
     ),
-    /// The task has ended because the block-sync queue is full: a node failure.
-    QueueFull,
+    /// The task has ended on the block-sync queue's error: a node failure.
+    Queue(QueueError),
 }
 
 pub struct ConnectionHandle {
@@ -102,8 +102,8 @@ pub fn spawn<Q: MessageQueue + 'static>(
     let task = tokio::spawn(async move {
         loop {
             let Err(error) = connection.run(address, &mut outgoing_rx).await;
-            if let Error::QueueFull = error {
-                connection.report(Event::QueueFull);
+            if let Error::Queue(error) = error {
+                connection.report(Event::Queue(error));
                 return;
             }
             connection.report(Event::Disconnected(error));
@@ -233,7 +233,7 @@ impl<Q: MessageQueue> Connection<Q> {
                     command: command_string,
                     payload,
                 };
-                self.queue.push(message).map_err(|_| Error::QueueFull)?;
+                self.queue.push(message)?;
             }
         }
         Ok(())

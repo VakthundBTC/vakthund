@@ -172,7 +172,7 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
                 entry.state = PeerState::Connected;
             }
             Event::Disconnected(_) => entry.state = PeerState::Known,
-            Event::QueueFull => return Err(Error::QueueFull),
+            Event::Queue(error) => return Err(error.into()),
         }
         Ok(())
     }

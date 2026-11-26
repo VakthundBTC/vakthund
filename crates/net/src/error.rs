@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 
 use bitcoin_p2p_messages::{Magic, UnknownNetworkError};
 use interfaces::net::PeerId;
+use interfaces::queue::QueueError;
 use store::StoreError;
 
 use crate::connection::CONNECT_TIMEOUT;
@@ -30,8 +31,8 @@ pub enum Error {
     #[error("no pong for {:?}", PONG_TIMEOUT)]
     PongTimeout,
     /// A node failure: the node must stop.
-    #[error("the block-sync queue is full")]
-    QueueFull,
+    #[error("block-sync queue: {0}")]
+    Queue(#[from] QueueError),
     #[error(transparent)]
     Command(#[from] CommandStringError),
     #[error("the system clock is before 1970 or too far in the future")]

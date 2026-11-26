@@ -13,11 +13,14 @@ pub struct RoutedMessage {
     pub payload: Vec<u8>,
 }
 
-/// A full queue is a node failure: the node stops. Messages are never dropped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QueueFull;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum QueueError {
+    /// A node failure: the node stops. Messages are never dropped.
+    #[error("the queue is full")]
+    Full,
+}
 
 /// Pushing never calls into the owning module and never waits.
 pub trait MessageQueue: Send + Sync {
-    fn push(&self, message: RoutedMessage) -> Result<(), QueueFull>;
+    fn push(&self, message: RoutedMessage) -> Result<(), QueueError>;
 }
