@@ -1,7 +1,6 @@
-//! One connection to a peer (`docs/modules/net/README.md`, "Connection flow", "Pings"). The task
-//! reports what happens as [`Report`]s and never changes peer state itself.
+//! One connection to a peer (`docs/modules/net/README.md`, "Connection flow", "Pings",
+//! "Stopping"). The task reports what happens as [`Report`]s and never changes peer state itself.
 
-use std::convert::Infallible;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::pin;
 use std::sync::Arc;
@@ -14,12 +13,13 @@ use bitcoin_p2p_messages::message_network::{UserAgent, VersionMessage};
 use bitcoin_p2p_messages::{Magic, ProtocolVersion, ServiceFlags};
 use interfaces::net::{PeerFeatures, PeerId};
 use interfaces::queue::{MessageQueue, QueueError, RoutedMessage};
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::error::Error;
 use crate::frame::{read_frame, write_frame};
@@ -56,7 +56,7 @@ pub enum Event {
 
 pub struct ConnectionHandle {
     outgoing: mpsc::UnboundedSender<Frame>,
-    task: JoinHandle<()>,
+    token: CancellationToken,
 }
 
 impl ConnectionHandle {
@@ -67,12 +67,18 @@ impl ConnectionHandle {
             .map_err(|_| Error::Closed)
     }
 
-    /// Ends the connection and the reconnects without a `Disconnected` event.
+    /// Ends the connection and the reconnects without a `Disconnected` event; does not wait for
+    /// the task to end.
     pub fn stop(self) {
-        self.task.abort();
+        self.token.cancel();
     }
 }
 
+/// The task ends when `token` is cancelled; `tracker` lets [`interfaces::net::Net::stop`] wait for it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the connection's whole configuration"
+)]
 pub fn spawn<Q: MessageQueue + 'static>(
     peer: PeerId,
     address: SocketAddr,
@@ -80,6 +86,8 @@ pub fn spawn<Q: MessageQueue + 'static>(
     reconnect_delay: Duration,
     queue: Arc<Q>,
     reports: mpsc::UnboundedSender<Report>,
+    token: CancellationToken,
+    tracker: &TaskTracker,
 ) -> ConnectionHandle {
     let (outgoing, mut outgoing_rx) = mpsc::unbounded_channel();
     let connection = Connection {
@@ -87,22 +95,29 @@ pub fn spawn<Q: MessageQueue + 'static>(
         magic,
         queue,
         reports,
+        token: token.clone(),
     };
-    let task = tokio::spawn(async move {
+    tracker.spawn(async move {
         loop {
-            let Err(error) = connection.run(address, &mut outgoing_rx).await;
-            if let Error::Queue(error) = error {
-                connection.report(Event::Queue(error));
+            let error = match connection.run(address, &mut outgoing_rx).await {
+                Ok(()) => return,
+                Err(Error::Queue(error)) => {
+                    connection.report(Event::Queue(error));
+                    return;
+                }
+                Err(error) => error,
+            };
+            connection.report(Event::Disconnected(error));
+            let delay = time::sleep(reconnect_delay);
+            if connection.token.run_until_cancelled(delay).await.is_none() {
                 return;
             }
-            connection.report(Event::Disconnected(error));
-            time::sleep(reconnect_delay).await;
             // Messages for the connection that ended are not sent on the next one.
             while outgoing_rx.try_recv().is_ok() {}
             connection.report(Event::Reconnecting);
         }
     });
-    ConnectionHandle { outgoing, task }
+    ConnectionHandle { outgoing, token }
 }
 
 struct Connection<Q> {
@@ -110,22 +125,26 @@ struct Connection<Q> {
     magic: Magic,
     queue: Arc<Q>,
     reports: mpsc::UnboundedSender<Report>,
+    token: CancellationToken,
 }
 
 impl<Q: MessageQueue> Connection<Q> {
+    /// `Ok` only when the token is cancelled.
     async fn run(
         &self,
         address: SocketAddr,
         outgoing: &mut mpsc::UnboundedReceiver<Frame>,
-    ) -> Result<Infallible, Error> {
+    ) -> Result<(), Error> {
         let connecting = async {
             let mut stream = TcpStream::connect(address).await?;
             let features = self.handshake(&mut stream, address).await?;
             Ok::<_, Error>((stream, features))
         };
-        let (stream, features) = time::timeout(CONNECT_TIMEOUT, connecting)
-            .await
-            .map_err(|_| Error::ConnectTimeout)??;
+        let connecting = time::timeout(CONNECT_TIMEOUT, connecting);
+        let Some(connected) = self.token.run_until_cancelled(connecting).await else {
+            return Ok(());
+        };
+        let (stream, features) = connected.map_err(|_| Error::ConnectTimeout)??;
         self.report(Event::Connected(features));
 
         let (reader, mut writer) = stream.into_split();
@@ -147,6 +166,11 @@ impl<Q: MessageQueue> Connection<Q> {
                 }
                 ping = pings.next_ping() => {
                     self.write(&mut writer, Command::Ping, &encode_to_vec(&ping?)).await?;
+                }
+                () = self.token.cancelled() => {
+                    // The connection is ending either way: a failed close changes nothing.
+                    let _ = writer.shutdown().await;
+                    return Ok(());
                 }
             }
         }

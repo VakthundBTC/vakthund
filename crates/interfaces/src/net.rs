@@ -51,7 +51,7 @@ pub struct Peer {
     pub state: PeerState,
 }
 
-/// Every call except `get_peers` and `get_peer` fails for an unknown peer id.
+/// Every call that takes a peer id, except `get_peer`, fails for an unknown one.
 pub trait Net: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 
@@ -91,4 +91,7 @@ pub trait Net: Send + Sync {
         command: CommandString,
         payload: Vec<u8>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Closes every connection and waits for them, for a bounded time; `keep_connected` is kept.
+    fn stop(&self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }

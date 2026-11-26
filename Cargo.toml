@@ -16,7 +16,8 @@ rand = "0.10.3"
 rocksdb = "0.25.0"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
 toml = "1.2.0"
 
 block-sync = { path = "crates/block-sync" }

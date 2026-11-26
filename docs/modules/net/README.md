@@ -117,10 +117,22 @@ after `reconnect_delay_secs`.
 
 ---
 
+## Stopping
+
+The node calls [`stop`](#stop) when it shuts down ([lifecycle](../../architecture/overview.md#lifecycle)); `block-sync`
+does not call it.
+
+`net` closes every connection: a message being written is finished, messages queued for sending are dropped, and the
+TCP connection is closed. A connection flow in progress and a wait to reconnect end at once. `net` waits up to 5 seconds
+for the connections to close, then stops anyway. `keep_connected` is kept, so the same peers are connected at the next
+start-up.
+
+---
+
 ## Interface
 
-Direct calls. In v0.1 the only caller is `block-sync`. Every call except `get_peers` and `get_peer` fails for an unknown
-peer id.
+Direct calls. In v0.1 the callers are `block-sync` and, for `stop`, the node. Every call that takes a peer id, except
+`get_peer`, fails for an unknown one.
 
 ### get_peers(state?)
 
@@ -150,12 +162,17 @@ is `connecting` or `connected`, or if `net` is waiting to reconnect to it.
 ### disconnect(id)
 
 Clears the peer's `keep_connected`, and stops the connection with the peer and the reconnects to it; its state becomes
-`known` and it stays in `peer-list`.
+`known` and it stays in `peer-list`. The connection is closed as on [stopping](#stopping); `disconnect` does not wait
+for it.
 Stops nothing for a `known` peer that `net` is not reconnecting to.
 
 ### send(id, command, payload)
 
 Sends the message to the peer if it is `connected`; fails otherwise. The answer, if any, is routed to the queue.
+
+### stop()
+
+Closes every connection and stops `net` (see [stopping](#stopping)).
 
 ---
 

@@ -1,8 +1,7 @@
-//! The owner of the peers (`docs/modules/net/README.md`, "Peers"): it starts and stops the
-//! connections, applies their reports, and is the only writer of `peer-list`.
+//! The owner of the peers (`docs/modules/net/README.md`, "Peers", "Stopping"): it starts and stops
+//! the connections, applies their reports, and is the only writer of `peer-list`.
 
 use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,11 +14,17 @@ use interfaces::net::{Net, Peer, PeerId, PeerState};
 use interfaces::queue::MessageQueue;
 use store::{Store, TableSpec};
 use tokio::sync::{Mutex, mpsc};
+use tokio::time;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::config::NetConfig;
 use crate::connection::{self, ConnectionHandle, Event, Report};
 use crate::error::Error;
 use crate::peer_list::{PeerList, PeerRecord, peer_id};
+
+/// How long [`Net::stop`] waits for the connections to close.
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct NetManager<Q> {
     magic: Magic,
@@ -30,6 +35,9 @@ pub struct NetManager<Q> {
     reports_tx: mpsc::UnboundedSender<Report>,
     /// Taken by [`NetManager::run`] for as long as it runs.
     reports: Mutex<mpsc::UnboundedReceiver<Report>>,
+    /// Every connection's token is its child.
+    stopped: CancellationToken,
+    tracker: TaskTracker,
 }
 
 struct PeerRegistry {
@@ -121,12 +129,14 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
             peers: Mutex::new(peers),
             reports_tx,
             reports: Mutex::new(reports),
+            stopped: CancellationToken::new(),
+            tracker: TaskTracker::new(),
         })
     }
 
     /// Connects to every peer with `keep_connected` and no connection yet, then applies the
-    /// connections' reports. Returns only on a node failure.
-    pub async fn run(&self) -> Result<Infallible, Error> {
+    /// connections' reports. Returns `Ok` after [`Net::stop`], an error on a node failure.
+    pub async fn run(&self) -> Result<(), Error> {
         let mut reports = self.reports.lock().await;
         {
             let mut peers = self.peers.lock().await;
@@ -140,11 +150,15 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
                 self.start(&mut peers, id)?;
             }
         }
-        while let Some(report) = reports.recv().await {
-            self.apply(report).await?;
+        loop {
+            tokio::select! {
+                report = reports.recv() => {
+                    // The manager holds a sender, so the channel never closes.
+                    self.apply(report.ok_or(Error::Closed)?).await?;
+                }
+                () = self.stopped.cancelled() => return Ok(()),
+            }
         }
-        // Not reached: the manager holds a sender, so the channel never closes.
-        Err(Error::Closed)
     }
 
     async fn apply(&self, report: Report) -> Result<(), Error> {
@@ -200,6 +214,8 @@ impl<Q: MessageQueue + 'static> NetManager<Q> {
             self.reconnect_delay,
             Arc::clone(&self.queue),
             self.reports_tx.clone(),
+            self.stopped.child_token(),
+            &self.tracker,
         );
         entry.connection = Some(handle);
         entry.state = PeerState::Connecting;
@@ -285,6 +301,16 @@ impl<Q: MessageQueue + 'static> Net for NetManager<Q> {
             (PeerState::Connected, Some(connection)) => connection.send(command, payload),
             _ => Err(Error::NotConnected(id)),
         }
+    }
+
+    /// `docs/modules/net/README.md`, "Stopping". Waits at most `STOP_TIMEOUT`: a connection
+    /// still writing to a peer that does not read is left behind.
+    async fn stop(&self) -> Result<(), Error> {
+        self.stopped.cancel();
+        self.tracker.close();
+        // Not an error: the docs let `net` stop anyway.
+        let _ = time::timeout(STOP_TIMEOUT, self.tracker.wait()).await;
+        Ok(())
     }
 }
 
