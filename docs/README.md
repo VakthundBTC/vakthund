@@ -12,8 +12,6 @@ v0.1:
 
 Not in v0.1: relaying blocks, relaying or accepting transactions, a mempool, mining, wallet.
 
-Open questions are listed in [open-questions.md](open-questions.md) and referenced in the text as **[Qn]**.
-
 ## Modules
 
 | Module                                     | Role                                                                                                                                       |
@@ -28,7 +26,6 @@ Open questions are listed in [open-questions.md](open-questions.md) and referenc
 2. [architecture/storage.md](architecture/storage.md): stores, atomicity, write ordering.
 3. [modules/](modules/): one folder per module with entities, state and interface.
 4. [flows/](flows/README.md): communication, IBD, standard mode, reorg.
-5. [open-questions.md](open-questions.md).
 
 ## Conventions
 

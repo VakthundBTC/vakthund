@@ -9,6 +9,7 @@ A **store** is the unit of atomicity: a set of tables written together in all-or
   be replaced independently.
 - A store belongs to exactly one module.
 - There is no atomicity across stores. Consistency across stores is defined by [write ordering](#write-ordering).
+- A failed read or write of a store is a node failure, and the node stops.
 
 | Module | Store        | Tables                            | Path                                    |
 |--------|--------------|-----------------------------------|-----------------------------------------|
@@ -61,9 +62,9 @@ Only valid headers are stored.
 
 ## peer-list
 
-| Table       | Key                      | Value                                                                  | Profile      |
-|-------------|--------------------------|------------------------------------------------------------------------|--------------|
-| `peer-list` | peer address (`ip:port`) | features recorded for the peer ([net](../modules/net/README.md#state)) | point lookup |
+| Table       | Key                      | Value                                                                                           | Profile      |
+|-------------|--------------------------|-------------------------------------------------------------------------------------------------|--------------|
+| `peer-list` | peer address (`ip:port`) | `keep_connected` and the features recorded for the peer ([net](../modules/net/README.md#state)) | point lookup |
 
 ----
 

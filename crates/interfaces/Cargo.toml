@@ -1,0 +1,11 @@
+[package]
+name = "interfaces"
+description = "Interfaces between the Vakthund modules: the calls of net and chain, and the block-sync queue."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bitcoin = { workspace = true }
+bitcoin-p2p-messages = { workspace = true }
+thiserror = { workspace = true }

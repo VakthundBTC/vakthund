@@ -60,7 +60,8 @@ download in [peer selection](#peer-selection), the LCA search in
 
 ## Interface
 
-`block-sync` exposes no calls to other modules. Its only input from other modules is its queue.
+`block-sync` exposes no calls to other modules. Its only input from other modules is its queue, which they reach
+through a push-only interface: they can push a message, but cannot read the queue.
 
 ---
 

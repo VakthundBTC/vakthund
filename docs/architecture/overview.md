@@ -61,8 +61,8 @@ One TOML file. Top-level keys apply to every module; each module reads its own
 table ([net](../modules/net/README.md#configuration), [chain](../modules/chain/README.md#configuration), [block-sync](../modules/block-sync/README.md#configuration)).
 
 ```toml
-network = "main"           # main | testnet4 | signet | regtest
-datadir = "~/.vakthund"        # stores live under <datadir>/<network>/
+network = "main"               # main | testnet4 | signet | regtest
+datadir = "/path/to/datadir"   # required, an absolute path; stores live under <datadir>/<network>/
 ```
 
 ## Dependencies

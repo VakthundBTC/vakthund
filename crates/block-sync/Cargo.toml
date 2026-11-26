@@ -1,0 +1,9 @@
+[package]
+name = "block-sync"
+description = "Initial block download, standard mode and reorgs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }

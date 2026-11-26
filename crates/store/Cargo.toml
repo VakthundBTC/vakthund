@@ -1,0 +1,10 @@
+[package]
+name = "store"
+description = "Stores on RocksDB: one instance per store, tables with typed keys and values."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rocksdb = { workspace = true }
+thiserror = { workspace = true }
