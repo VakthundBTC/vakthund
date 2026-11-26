@@ -1,13 +1,8 @@
-//! The routing table (`docs/modules/net/README.md`, "Routing table"). A command missing from
-//! [`Command`] has no owner and its messages are dropped.
+//! The commands of the routing table (`docs/modules/net/README.md`, "Routing table"); their
+//! owners are matched in `Connection::handle_command`. A command missing from [`Command`] has no
+//! owner and its messages are dropped.
 
 use bitcoin_p2p_messages::message::{CommandString, CommandStringError};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Owner {
-    Net,
-    BlockSync,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
@@ -64,19 +59,5 @@ impl Command {
 
     pub fn to_command_string(self) -> Result<CommandString, CommandStringError> {
         CommandString::try_from(self.name())
-    }
-
-    pub fn owner(self) -> Owner {
-        match self {
-            Self::Version | Self::Verack | Self::SendHeaders | Self::Ping | Self::Pong => {
-                Owner::Net
-            }
-            Self::Headers
-            | Self::Block
-            | Self::Inv
-            | Self::NotFound
-            | Self::GetHeaders
-            | Self::GetData => Owner::BlockSync,
-        }
     }
 }

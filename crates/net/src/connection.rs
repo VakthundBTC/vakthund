@@ -24,7 +24,7 @@ use tokio::time;
 use crate::error::Error;
 use crate::frame::{read_frame, write_frame};
 use crate::ping::PingManager;
-use crate::routing::{Command, Owner};
+use crate::routing::Command;
 
 /// For the TCP connection and the features exchange together.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -196,22 +196,26 @@ impl<Q: MessageQueue> Connection<Q> {
         let Some(command) = Command::parse(&command_string) else {
             return Ok(());
         };
-        match command.owner() {
-            Owner::Net => match command {
-                Command::Ping => {
-                    let ping: Ping = decode(Command::Ping, &payload)?;
-                    let pong = encode_to_vec(&Pong::from_ping(&ping));
-                    self.write(writer, Command::Pong, &pong).await?;
-                }
-                Command::Pong => {
-                    let pong: Pong = decode(Command::Pong, &payload)?;
-                    pings.pong_received(&pong);
-                }
-                // `version` and `verack` after the features exchange; `sendheaders` from the
-                // peer is not acted on, the node does not announce blocks.
-                _ => {}
-            },
-            Owner::BlockSync => {
+        // Exhaustive, so a new command must be given an owner.
+        match command {
+            Command::Ping => {
+                let ping: Ping = decode(Command::Ping, &payload)?;
+                let pong = encode_to_vec(&Pong::from_ping(&ping));
+                self.write(writer, Command::Pong, &pong).await?;
+            }
+            Command::Pong => {
+                let pong: Pong = decode(Command::Pong, &payload)?;
+                pings.pong_received(&pong);
+            }
+            // `version` and `verack` after the features exchange; `sendheaders` from the peer is
+            // not acted on, the node does not announce blocks.
+            Command::Version | Command::Verack | Command::SendHeaders => {}
+            Command::Headers
+            | Command::Block
+            | Command::Inv
+            | Command::NotFound
+            | Command::GetHeaders
+            | Command::GetData => {
                 let message = RoutedMessage {
                     peer: self.peer,
                     command: command_string,
