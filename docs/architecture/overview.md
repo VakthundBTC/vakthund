@@ -28,7 +28,9 @@ flowchart LR
 
 `chain` calls no other module. `net` calls no other module; it only pushes routed messages into queues.
 
-Queues are bounded. Messages are never dropped from a queue: a full queue is a node failure, and the node stops.
+Queues are bounded. The `block-sync` queue drops its oldest messages when it is full
+([queue](../modules/block-sync/state-machines.md#queue)): `block-sync` stops taking messages while a reorg runs, and a
+dropped message is a request that fails and is sent again, or an announcement the next one catches up.
 
 ## Module boundaries
 

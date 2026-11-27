@@ -1,25 +1,33 @@
-# Bode: Initial Block Download
+# Mode: Initial Block Download
 
-During IBD all other processes are paused, except maintaining the connections with peers.
-Messages in the `block-sync` queue that are not part of the IBD are skipped. A message is part of the IBD when it
-answers a request `block-sync` sent for the IBD.
+The node is in IBD when, at start-up, the tip is the genesis block or its chain work is below `minimum_chain_work`
+([modes](../modules/block-sync/state-machines.md#modes)): on the first launch, and after a restart that left the node
+far behind. During IBD `block-sync` follows one peer, the sync peer; messages from every other peer are dropped. The
+states and their failure handling are specified in the
+[IBD machine](../modules/block-sync/state-machines.md#ibd-machine).
 
-The node enters IBD on first launch, when the database is clear and tip is genesis block.
+## Choosing the sync peer
+
+`block-sync` calls `net.get_peers(connected)` and takes the peers whose features include `NODE_NETWORK` and
+`NODE_WITNESS` and that have not failed permanently. It prefers a peer that has not failed; otherwise it takes the one
+whose temporary failure is the oldest. If there is none, it tries again a second later.
+
+A peer fails permanently when it sends invalid headers, a mutated block or a block invalid by consensus, and is never
+chosen again during this IBD. Every other failure is temporary: its requests failed `sync_peer_attempts` times in a row
+([failed requests](../modules/block-sync/state-machines.md#failed-requests)), it disconnected, or its chain is behind:
+no more chain work than `minimum_chain_work`. When the sync peer fails, `block-sync` chooses another one and continues
+from what is stored.
 
 ## Downloading headers
 
-1. `block-sync` selects one connected peer, the sync peer, using `net` as the CRUD for peers.
-2. `block-sync` requests `getheaders` from it, in batches of 2000 headers. The first request carries a locator of the
-   active chain; each next request carries the last header
-   received ([block locator](../modules/block-sync/README.md#block-locator)).
-3. `block-sync` continues until it has downloaded all headers this peer knows: an answer with fewer than 2000 headers.
-4. `block-sync` validates the whole header chain by calling `chain.validate_headers`, and stores it with
-   `chain.store_headers`.
-
-If a `getheaders` to the sync peer fails ([request timeout](../modules/block-sync/README.md#request-timeout)),
-`block-sync` selects another random connected peer as the sync peer and repeats the request with the same locator; the
-download resumes from the last header received. When every connected peer has failed in turn, `block-sync` waits
-`request_timeout_secs` seconds and starts again with the first.
+1. `block-sync` sends `getheaders` to the sync peer with the last header downloaded so far, if any, followed by a full
+   locator of the active chain ([block locator](mode-standard.md#block-locator)). The parent of the first header in the
+   answer is where the peer's chain leaves ours.
+2. It validates each answer with `chain.validate_headers` and stores it with `chain.store_headers`, then sends the next
+   `getheaders` with the last header received.
+3. It continues until an answer has fewer than 2000 headers: the peer has no more.
+4. If the chain work of the last header is above `minimum_chain_work`, the blocks are downloaded. Otherwise the sync
+   peer is behind: `block-sync` chooses another one. The headers stay stored; the next sync peer may extend them.
 
 ```mermaid
 sequenceDiagram
@@ -28,81 +36,66 @@ sequenceDiagram
     participant N as net
     participant P as sync peer
     participant C as chain
-    BS ->> N: net.peers(status=connected)
+    BS ->> N: net.get_peers(connected)
     N -->> BS: connected peers
-    Note over BS: select one peer
+    Note over BS: choose the sync peer
     loop until an answer has fewer than 2000 headers
         BS ->> N: net.send(peer, "getheaders", getheaders)
         N -) P: getheaders
         P -) N: headers
         N -) BS: queue: {peer, "headers", headers}
-        Note over BS: if no answer within the request timeout —<br/> select another connected peer as the sync peer,<br/>repeat the request with the same locator
+        BS ->> C: chain.validate_headers(headers)
+        C -->> BS: ok {last_chain_work}
+        BS ->> C: chain.store_headers(headers)
+        C -->> BS: ok
     end
-    BS ->> C: chain.validate_headers(headers[..])
-    C -->> BS: ok
-    BS ->> C: chain.store_headers(headers[..])
-    C -->> BS: ok
+    Note over BS: chain work above minimum_chain_work — download the blocks,<br/>otherwise choose another sync peer
 ```
 
-At this point the node has the ~full header history, validated on the header level only. The downloaded headers form the
-candidate header chain.
-
----
+Invalid headers (`validate_headers` rejected or `not_connected`) are a permanent failure of the sync peer; the headers
+stored before them stay.
 
 ## Downloading blocks
 
-Blocks are downloaded from the beginning ([block download](../modules/block-sync/README.md#block-download)).
+Blocks are downloaded in the order of the headers
+([BlocksDownload](../modules/block-sync/state-machines.md#blocksdownload)).
 
-1. The current tip block is at height `tip`: all headers, and all blocks up to and including the tip block, are
-   validated and stored.
-2. `block-sync` knows the candidate headers `tip+1 ...`. Blocks which are already stored are not requested. For the
-   others it sends `getdata` (`MSG_WITNESS_BLOCK`) to the sync peer; if the sync peer does not answer, to random
-   eligible peers ([peer selection](../modules/block-sync/README.md#peer-selection)). Requests are made in batches (
-   TBD).
-3. When a block is received, `block-sync` calls `chain.store_block` with it. If the block is rejected:
-    - `rejected {mutated}`: `block-sync` requests the block from another eligible peer.
-    - `rejected {consensus}`: `block-sync` reports a consensus failure and the node stops.
-4. When the block `tip+1` is stored, `block-sync` calls `chain.connect_block` with its hash. If the block is valid,
-   `chain` moves the tip to it and `block-sync` continues from step 1. Otherwise the block is invalid by consensus while
-   its header is valid: `block-sync` reports a consensus failure and the node stops.
-5. If a block is unavailable from every eligible peer, `block-sync` switches to standard mode on the current tip
-   ([unavailable block](../modules/block-sync/README.md#unavailable-block)).
+1. If the tip is on a fork that the downloaded headers leave, `block-sync` calls `chain.disconnect_tip` until the tip is
+   the block where they leave the active chain. The tip is briefly lower; nothing else runs during IBD.
+2. `block-sync` sends `getdata` (`MSG_WITNESS_BLOCK`) to the sync peer for the blocks after the tip, keeping at most 16
+   in flight. Blocks which are already stored (`has_block`) are not requested.
+3. When a block is received, `block-sync` calls `chain.store_block` with it. Mutated: a permanent failure of the sync
+   peer. Invalid by consensus: the block is added to the
+   [invalid blocks](../modules/block-sync/state-machines.md#invalid-blocks), the headers after it are dropped, and the
+   sync peer fails permanently.
+4. While the block after the tip is stored, `block-sync` calls `chain.connect_block` with its hash, and the tip moves to
+   it. A rejection is handled as a block invalid by consensus.
+5. `block-sync` requests more blocks, until the last block of the downloaded headers is connected. Then IBD is done and
+   `block-sync` enters standard mode.
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant BS as block-sync
     participant N as net
-    participant P as sync peer, then random peers
+    participant P as sync peer
     participant C as chain
-    BS ->> C: chain.tip()
-    C -->> BS: tip
-    Note over BS: knows candidate headers tip+1..tip+n<br/>skips the blocks with has_block
-    BS ->> N: net.send(sync peer, "getdata", getdata[tip+1..tip+n])
+    Note over BS: knows the stored headers after the tip<br/>skips the blocks with has_block
+    BS ->> N: net.send(sync peer, "getdata", getdata[at most 16 blocks])
     N -) P: getdata
-    P -) N: block[tip+1..tip+n]
-    N -) BS: queue: {peer, "block", block[tip+1..tip+n]}
-    Note over BS: if no answer within the request timeout, or notfound —<br/>request the missing blocks from a random connected peer,<br/>unavailable from every peer — standard mode
-    loop for each received block
-        BS ->> C: chain.store_block(block)
-        alt stored
-            C -->> BS: stored
-        else mutated
-            C -->> BS: rejected {mutated, reason}
-            Note over BS: request the block from another eligible peer
-        else invalid
-            C -->> BS: rejected {consensus, reason}
-            Note over BS: consensus failure, the node stops
-        end
+    P -) N: block
+    N -) BS: queue: {peer, "block", block}
+    Note over BS: no answer within the request timeout, or notfound —<br/>send again. Failed sync_peer_attempts times in a row —<br/>choose another sync peer
+    BS ->> C: chain.store_block(block)
+    alt stored
+        C -->> BS: stored
+    else mutated or invalid
+        C -->> BS: rejected {mutated | consensus, reason}
+        Note over BS: the sync peer fails permanently
     end
-    loop for k in 1..n, in height order
-        BS ->> C: chain.connect_block(hash of tip+k)
-        alt Block valid and follows the tip
-            Note over C: updates tip
-            C -->> BS: new tip
-        else rejected
-            C -->> BS: rejected {reason}
-            Note over BS: consensus failure, the node stops
-        end
+    loop while the block after the tip is stored
+        BS ->> C: chain.connect_block(hash of tip+1)
+        C -->> BS: new tip, or rejected (invalid by consensus)
     end
+    Note over BS: request more blocks, until the last one is connected — standard mode
 ```

@@ -6,6 +6,10 @@ falls back to an `inv` carrying only the block hash when it has more than 8 bloc
 which blocks the node has ([processing inventory](#processing-inventory)). For every announced header `block-sync`
 decides whether it follows the tip or whether the chain has to be reorganized.
 
+Each connected peer has a peer machine ([peer machine](../modules/block-sync/state-machines.md#peer-machine)). A
+machine handles one announcement at a time: an announcement that arrives while it is busy is dropped, and the peer's
+next announcement catches up.
+
 ## Processing inventory
 
 An `inv` message announces objects by hash only: for a block, `block-sync` learns the 32-byte block hash H. So,
@@ -85,15 +89,17 @@ at every entry, always ending with genesis. For a tip at height 1000 the heights
 ```
 
 About 20 hashes cover any chain length; the protocol allows at most 101. Because the locator is sparse further back, the
-block found by the peer can be below the actual fork point. The headers between them are already on our active chain and
-are skipped (step 3 below).
+block found by the peer can be below the actual fork point. The headers between them are already on our active chain:
+the LCA is found by walking back from H once the headers are stored
+([peer machine](../modules/block-sync/state-machines.md#peer-machine)).
 
 ### Flow
 
 So, imagine we received a header from a peer. After validation (if successful) we have to find its theoretical height.
 We first try searching its parent in the `headers` table. If the entry exists, we will obtain all information we may
-need (i.e. height). Otherwise, we start searching the last common ancestor (LCA). A block hash from an `inv` has no
-known parent and starts the LCA search directly ([processing inventory](#processing-inventory)).
+need (i.e. height), and the LCA is found locally: walking back from the parent with `chain.header` until a header of
+the active chain. Otherwise, we start searching the last common ancestor (LCA) with the peer. A block hash from an `inv`
+has no known parent and starts the LCA search directly ([processing inventory](#processing-inventory)).
 
 The LCA search is a loop of `getheaders` requests to the peer that announced H. The first request carries a full locator
 of the active chain, each next request a locator consisting of the last header received; every request carries
@@ -105,7 +111,8 @@ of the active chain, each next request a locator consisting of the last header r
   the collected headers are discarded and H is dropped.
 
 An empty `headers` message from a peer with an outstanding `getheaders` is the answer to that request. A request that
-is not answered within the request timeout ends the search as a dropped H.
+is not answered within the request timeout is sent again; when the peer has failed `sync_peer_attempts` times in a row
+([failed requests](../modules/block-sync/state-machines.md#failed-requests)), the search ends as a dropped H.
 
 ```mermaid
 sequenceDiagram
@@ -142,19 +149,19 @@ if it is at most the chain work of the tip, the headers LCA + 1 ... H are not st
 
 ### Append new header
 
-If the LCA is the current tip, we can just update it sequentially. This is the same procedure as the
-[IBD block download](mode-ibd.md#downloading-blocks) over the stored headers `tip + 1 ... H`
-([block download](../modules/block-sync/README.md#block-download)): blocks that are already stored are not
-requested. The others are requested from the peer that announced H, and if it does not answer — from random eligible
-peers ([peer selection](../modules/block-sync/README.md#peer-selection)). Then each received
-block is stored with `chain.store_block` and connected with `chain.connect_block` in height order. A block unavailable
-from every eligible peer ends the download ([unavailable block](../modules/block-sync/README.md#unavailable-block)): the
-headers stay stored and the blocks are requested again on the next announcement.
+If the LCA is the current tip, we can just update it sequentially: this is a [reorg](mode-reorg.md) with k = 0. The
+blocks of the stored headers `tip + 1 ... H` are downloaded
+([DownloadBlocks](../modules/block-sync/state-machines.md#downloadblocks)): blocks that are already stored are not
+requested; the others are requested from the peer that announced H, at most 16 at a time. Each received block is stored
+with `chain.store_block`. When the peer has failed `sync_peer_attempts` times in a row, the download is dropped: the
+headers and the blocks stored so far stay, and the next announcement leads to the remaining blocks. When every block is
+stored, they are connected with `chain.connect_block` in height order by the
+[reorg machine](../modules/block-sync/state-machines.md#reorg-machine).
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant P1 as announcing peer, then random peers
+    participant P1 as announcing peer
     participant N as net
     participant BS as block-sync
     participant C as chain
@@ -168,7 +175,7 @@ sequenceDiagram
             N -) P1: getdata
             P1 -) N: block[H]
             N -) BS: queue: {announcing peer, "block", block[H]}
-            Note over BS: if no answer within the request timeout, or notfound —<br/>request the missing blocks from a random connected peer,<br/>unavailable from every peer — stop, wait for the next announcement
+            Note over BS: if no answer within the request timeout, or notfound —<br/>send again. The peer failed sync_peer_attempts times in a row —<br/>drop the download, wait for the next announcement
         end
 
         BS ->> C: chain.store_block(block[H])
@@ -182,9 +189,10 @@ sequenceDiagram
             C -->> BS: ok
         else rejected
             C -->> BS: rejected {reason}
-            Note over BS: consensus failure, the node stops
+            Note over BS: invalid block: disconnect the blocks connected so far,<br/>the tip returns to the old tip
         end
     end
 ```
 
-A rejected `store_block` or `connect_block` is handled as in [IBD](mode-ibd.md#downloading-blocks).
+A rejected `store_block` is handled in [DownloadBlocks](../modules/block-sync/state-machines.md#downloadblocks), a
+rejected `connect_block` by the [reorg machine](../modules/block-sync/state-machines.md#reorg-machine).
