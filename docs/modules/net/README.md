@@ -103,7 +103,8 @@ after `reconnect_delay_secs`.
 
 1. `net` receives a message. It can also be a response to one of our previous requests.
 2. `net` routes the message to the module that owns its command ([routing table](#routing-table)): it pushes
-   `{peer, command, payload}` to the `block-sync` queue. If the queue is full, it is a node failure and the node stops.
+   `{peer, command, payload}` to the `block-sync` queue. A full queue drops its oldest messages
+   ([queue](../block-sync/state-machines.md#queue)).
 3. `block-sync` initiates a request to respond to the peer, if a response is needed.
 
 ### Routing table
